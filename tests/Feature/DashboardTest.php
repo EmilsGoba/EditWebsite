@@ -1,7 +1,10 @@
 <?php
 
 use App\Models\Project;
+use App\Models\ProjectMedia;
 use App\Models\User;
+use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Storage;
 use Inertia\Testing\AssertableInertia as Assert;
 
 test('guests are redirected to the login page', function () {
@@ -44,13 +47,24 @@ test('users can open their own project editor', function () {
     $project = Project::factory()->for($user)->create([
         'name' => 'Editor project',
     ]);
+    $media = $project->media()->create([
+        'type' => 'video',
+        'original_name' => 'lesson-video.mp4',
+        'path' => 'projects/'.$project->id.'/media/lesson-video.mp4',
+        'disk' => 'public',
+        'mime_type' => 'video/mp4',
+        'size' => 1024,
+    ]);
 
     $this->actingAs($user)
         ->get(route('projects.edit', $project))
         ->assertInertia(fn (Assert $page) => $page
             ->component('projects/editor')
             ->where('project.id', $project->id)
-            ->where('project.name', 'Editor project'),
+            ->where('project.name', 'Editor project')
+            ->has('media', 1)
+            ->where('media.0.id', $media->id)
+            ->where('media.0.name', 'lesson-video.mp4'),
         );
 });
 
@@ -207,6 +221,121 @@ test('users cannot update another users project', function () {
         ->assertNotFound();
 
     expect($project->refresh()->name)->toBe('Private project');
+});
+
+test('users can upload media to their own project', function () {
+    Storage::fake('public');
+
+    $user = User::factory()->create();
+    $project = Project::factory()->for($user)->create();
+    $file = UploadedFile::fake()->create('sample-video.mp4', 2048, 'video/mp4');
+
+    $this->actingAs($user)
+        ->post(route('projects.media.store', $project), [
+            'type' => 'video',
+            'file' => $file,
+        ])
+        ->assertSessionHasNoErrors()
+        ->assertRedirect(route('projects.edit', $project));
+
+    $media = ProjectMedia::firstOrFail();
+
+    expect($media->project_id)->toBe($project->id)
+        ->and($media->type)->toBe('video')
+        ->and($media->original_name)->toBe('sample-video.mp4');
+
+    Storage::disk('public')->assertExists($media->path);
+});
+
+test('users cannot upload media to another users project', function () {
+    Storage::fake('public');
+
+    $user = User::factory()->create();
+    $otherUser = User::factory()->create();
+    $project = Project::factory()->for($otherUser)->create();
+    $file = UploadedFile::fake()->image('cover-image.jpg');
+
+    $this->actingAs($user)
+        ->post(route('projects.media.store', $project), [
+            'type' => 'image',
+            'file' => $file,
+        ])
+        ->assertNotFound();
+
+    expect(ProjectMedia::count())->toBe(0);
+});
+
+test('video uploads cannot be larger than five hundred megabytes', function () {
+    Storage::fake('public');
+
+    $user = User::factory()->create();
+    $project = Project::factory()->for($user)->create();
+    $file = UploadedFile::fake()->create('too-large.mp4', 512001, 'video/mp4');
+
+    $this->actingAs($user)
+        ->post(route('projects.media.store', $project), [
+            'type' => 'video',
+            'file' => $file,
+        ])
+        ->assertSessionHasErrors('file');
+
+    expect(ProjectMedia::count())->toBe(0);
+});
+
+test('users can delete selected media from their own project', function () {
+    Storage::fake('public');
+
+    $user = User::factory()->create();
+    $project = Project::factory()->for($user)->create();
+    Storage::disk('public')->put('projects/'.$project->id.'/media/delete-me.mp4', 'video');
+    $media = $project->media()->create([
+        'type' => 'video',
+        'original_name' => 'delete-me.mp4',
+        'path' => 'projects/'.$project->id.'/media/delete-me.mp4',
+        'disk' => 'public',
+        'mime_type' => 'video/mp4',
+        'size' => 1024,
+    ]);
+
+    $this->actingAs($user)
+        ->delete(route('projects.media.destroy', $project), [
+            'media_ids' => [$media->id],
+        ])
+        ->assertSessionHasNoErrors()
+        ->assertRedirect(route('projects.edit', $project));
+
+    $this->assertDatabaseMissing('project_media', [
+        'id' => $media->id,
+    ]);
+    Storage::disk('public')->assertMissing($media->path);
+});
+
+test('users cannot delete media through another users project', function () {
+    Storage::fake('public');
+
+    $user = User::factory()->create();
+    $otherUser = User::factory()->create();
+    $project = Project::factory()->for($otherUser)->create();
+    Storage::disk('public')->put('projects/'.$project->id.'/media/private.mp4', 'video');
+    $media = $project->media()->create([
+        'type' => 'video',
+        'original_name' => 'private.mp4',
+        'path' => 'projects/'.$project->id.'/media/private.mp4',
+        'disk' => 'public',
+        'mime_type' => 'video/mp4',
+        'size' => 1024,
+    ]);
+
+    $this->actingAs($user)
+        ->delete(route('projects.media.destroy', $project), [
+            'media_ids' => [$media->id],
+        ])
+        ->assertNotFound();
+
+    $this->assertDatabaseHas('project_media', [
+        'id' => $media->id,
+    ]);
+    Storage::disk('public')->assertExists($media->path);
 });
 
 test('users can delete their own project', function () {

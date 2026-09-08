@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react';
-import { Head, Link } from '@inertiajs/react';
+import { useMemo, useRef, useState } from 'react';
+import { Head, Link, router } from '@inertiajs/react';
 import {
     ArrowLeft,
     Clapperboard,
@@ -11,6 +11,7 @@ import {
     RotateCcw,
     Redo2,
     Scissors,
+    Trash2,
     Upload,
     Undo2,
     Volume2,
@@ -29,6 +30,17 @@ type Project = {
 
 type EditorProps = {
     project: Project;
+    media: ProjectMedia[];
+};
+
+type ProjectMedia = {
+    id: number;
+    type: 'video' | 'image' | 'audio';
+    name: string;
+    mime_type: string | null;
+    size: number;
+    url: string;
+    created_at: string;
 };
 
 const timelineClips = [
@@ -37,16 +49,17 @@ const timelineClips = [
     { id: 3, name: 'B-roll', width: '24%', color: 'bg-emerald-500' },
 ];
 
-const mediaItems = [
-    { id: 1, name: 'sample-video.mp4', type: 'Video', icon: Film },
-    { id: 2, name: 'cover-image.jpg', type: 'Image', icon: Image },
-    { id: 3, name: 'background-audio.mp3', type: 'Audio', icon: Volume2 },
-];
-
 const effectItems = ['Fade in', 'Blur', 'Color boost', 'Black and white'];
+const uploadLimits =
+    'Videos up to 500 MB, images up to 10 MB, audio up to 50 MB.';
 
-export default function Editor({ project }: EditorProps) {
+export default function Editor({ project, media }: EditorProps) {
+    const fileInputRef = useRef<HTMLInputElement>(null);
     const [isPlaying, setIsPlaying] = useState(false);
+    const [isUploading, setIsUploading] = useState(false);
+    const [uploadError, setUploadError] = useState<string | null>(null);
+    const [isDeletingMedia, setIsDeletingMedia] = useState(false);
+    const [selectedMediaIds, setSelectedMediaIds] = useState<number[]>([]);
     const [selectedTool, setSelectedTool] = useState<'select' | 'cut'>(
         'select',
     );
@@ -88,6 +101,124 @@ export default function Editor({ project }: EditorProps) {
             className: 'w-[86%]',
         };
     }, [project.format]);
+
+    function getMediaIcon(type: ProjectMedia['type']) {
+        if (type === 'image') {
+            return Image;
+        }
+
+        if (type === 'audio') {
+            return Volume2;
+        }
+
+        return Film;
+    }
+
+    function getMediaType(file: File): ProjectMedia['type'] | null {
+        // The browser gives us the file MIME type, so we can send Laravel the correct upload category.
+        if (file.type.startsWith('video/')) {
+            return 'video';
+        }
+
+        if (file.type.startsWith('image/')) {
+            return 'image';
+        }
+
+        if (file.type.startsWith('audio/')) {
+            return 'audio';
+        }
+
+        return null;
+    }
+
+    function formatFileSize(size: number) {
+        if (size >= 1024 * 1024) {
+            return `${(size / 1024 / 1024).toFixed(1)} MB`;
+        }
+
+        return `${Math.max(1, Math.round(size / 1024))} KB`;
+    }
+
+    function openMediaPicker() {
+        fileInputRef.current?.click();
+    }
+
+    function uploadMedia(event: React.ChangeEvent<HTMLInputElement>) {
+        const file = event.target.files?.[0];
+
+        if (!file) {
+            return;
+        }
+
+        const type = getMediaType(file);
+
+        if (!type) {
+            setUploadError('Please upload a video, image, or audio file.');
+            event.target.value = '';
+            return;
+        }
+
+        setIsUploading(true);
+        setUploadError(null);
+
+        // This sends the selected file to Laravel, where it is validated, stored, and saved in MySQL.
+        router.post(
+            `/projects/${project.id}/media`,
+            { file, type },
+            {
+                forceFormData: true,
+                preserveScroll: true,
+                onError: (errors) => {
+                    setUploadError(
+                        errors.file ??
+                            'Upload failed. Check the file type and size.',
+                    );
+                },
+                onFinish: () => {
+                    setIsUploading(false);
+                    event.target.value = '';
+                },
+            },
+        );
+    }
+
+    function toggleDeleteMediaMode() {
+        // Delete mode shows checkboxes, then lets the user confirm before files are removed.
+        setIsDeletingMedia((currentValue) => !currentValue);
+        setSelectedMediaIds([]);
+    }
+
+    function toggleSelectedMedia(mediaId: number) {
+        setSelectedMediaIds((currentIds) => {
+            if (currentIds.includes(mediaId)) {
+                return currentIds.filter((id) => id !== mediaId);
+            }
+
+            return [...currentIds, mediaId];
+        });
+    }
+
+    function deleteSelectedMedia() {
+        if (selectedMediaIds.length === 0) {
+            return;
+        }
+
+        if (!confirm('Are you sure you want to delete the selected media?')) {
+            return;
+        }
+
+        // This sends the selected media IDs to Laravel, where the files and database rows are deleted.
+        router.delete(`/projects/${project.id}/media`, {
+            data: {
+                media_ids: selectedMediaIds,
+            },
+            preserveScroll: true,
+            onSuccess: () => {
+                setIsDeletingMedia(false);
+                setSelectedMediaIds([]);
+            },
+        });
+    }
 
     function togglePlayback() {
         // Temporary playback state for the mock editor. Real video playback can be added later.
@@ -172,39 +303,165 @@ export default function Editor({ project }: EditorProps) {
                                             Project files
                                         </p>
                                     </div>
-                                    <Button
-                                        size="icon"
-                                        variant="outline"
-                                        className="border-zinc-700 bg-zinc-950 text-zinc-200 hover:bg-zinc-800"
-                                    >
-                                        <Upload className="size-4" />
-                                        <span className="sr-only">
-                                            Upload media
-                                        </span>
-                                    </Button>
-                                </div>
-
-                                <div className="grid grid-cols-2 gap-3">
-                                    {mediaItems.map((item) => (
-                                        <button
-                                            className="group overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950 text-left transition hover:border-cyan-500"
-                                            key={item.id}
+                                    <div className="flex items-center gap-2">
+                                        {isDeletingMedia && (
+                                            <Button
+                                                className="h-9 border-red-500/40 bg-red-500/10 px-3 text-xs text-red-100 hover:bg-red-500/20"
+                                                disabled={
+                                                    selectedMediaIds.length ===
+                                                    0
+                                                }
+                                                onClick={deleteSelectedMedia}
+                                                type="button"
+                                                variant="outline"
+                                            >
+                                                Delete
+                                            </Button>
+                                        )}
+                                        <Button
+                                            size="icon"
+                                            variant="outline"
+                                            className="border-zinc-700 bg-zinc-950 text-zinc-200 hover:bg-zinc-800"
+                                            disabled={media.length === 0}
+                                            onClick={toggleDeleteMediaMode}
+                                            title="Select media to delete"
                                             type="button"
                                         >
-                                            <span className="flex aspect-video items-center justify-center bg-zinc-800">
-                                                <item.icon className="size-6 text-zinc-400 group-hover:text-cyan-400" />
+                                            <Trash2 className="size-4" />
+                                            <span className="sr-only">
+                                                Select media to delete
                                             </span>
-                                            <span className="block min-w-0 p-2">
-                                                <span className="block truncate text-xs font-medium text-zinc-200">
-                                                    {item.name}
-                                                </span>
-                                                <span className="text-xs text-zinc-500">
-                                                    {item.type}
-                                                </span>
+                                        </Button>
+                                        <Button
+                                            size="icon"
+                                            variant="outline"
+                                            className="border-zinc-700 bg-zinc-950 text-zinc-200 hover:bg-zinc-800"
+                                            disabled={isUploading}
+                                            onClick={openMediaPicker}
+                                            title={uploadLimits}
+                                            type="button"
+                                        >
+                                            <Upload className="size-4" />
+                                            <span className="sr-only">
+                                                Upload media
                                             </span>
-                                        </button>
-                                    ))}
+                                        </Button>
+                                    </div>
+                                    <input
+                                        ref={fileInputRef}
+                                        accept="video/*,image/*,audio/*"
+                                        className="hidden"
+                                        onChange={uploadMedia}
+                                        type="file"
+                                    />
                                 </div>
+
+                                {uploadError && (
+                                    <p className="mb-3 rounded border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+                                        {uploadError}
+                                    </p>
+                                )}
+
+                                {media.length > 0 ? (
+                                    <div className="grid grid-cols-2 gap-3">
+                                        {media.map((item) => {
+                                            const MediaIcon = getMediaIcon(
+                                                item.type,
+                                            );
+
+                                            return (
+                                                <button
+                                                    className={`group relative overflow-hidden rounded-lg border bg-zinc-950 text-left transition hover:border-cyan-500 ${
+                                                        selectedMediaIds.includes(
+                                                            item.id,
+                                                        )
+                                                            ? 'border-cyan-500'
+                                                            : 'border-zinc-800'
+                                                    }`}
+                                                    key={item.id}
+                                                    onClick={() => {
+                                                        if (isDeletingMedia) {
+                                                            toggleSelectedMedia(
+                                                                item.id,
+                                                            );
+                                                        }
+                                                    }}
+                                                    type="button"
+                                                >
+                                                    {isDeletingMedia && (
+                                                        <span className="absolute top-2 left-2 z-10 flex size-6 items-center justify-center rounded border border-zinc-600 bg-zinc-950/90">
+                                                            <input
+                                                                checked={selectedMediaIds.includes(
+                                                                    item.id,
+                                                                )}
+                                                                className="size-3.5 accent-cyan-500"
+                                                                onChange={() =>
+                                                                    toggleSelectedMedia(
+                                                                        item.id,
+                                                                    )
+                                                                }
+                                                                onClick={(
+                                                                    event,
+                                                                ) =>
+                                                                    event.stopPropagation()
+                                                                }
+                                                                type="checkbox"
+                                                            />
+                                                        </span>
+                                                    )}
+                                                    <span className="flex aspect-video items-center justify-center overflow-hidden bg-zinc-800">
+                                                        {item.type ===
+                                                        'image' ? (
+                                                            <img
+                                                                alt={item.name}
+                                                                className="size-full object-cover transition group-hover:scale-105"
+                                                                src={item.url}
+                                                            />
+                                                        ) : item.type ===
+                                                          'video' ? (
+                                                            <video
+                                                                className="size-full object-cover transition group-hover:scale-105"
+                                                                muted
+                                                                playsInline
+                                                                preload="metadata"
+                                                                src={item.url}
+                                                            >
+                                                                <track kind="captions" />
+                                                            </video>
+                                                        ) : (
+                                                            <MediaIcon className="size-6 text-zinc-400 group-hover:text-cyan-400" />
+                                                        )}
+                                                    </span>
+                                                    <span className="block min-w-0 p-2">
+                                                        <span className="block truncate text-xs font-medium text-zinc-200">
+                                                            {item.name}
+                                                        </span>
+                                                        <span className="flex items-center justify-between gap-2 text-xs text-zinc-500">
+                                                            <span className="capitalize">
+                                                                {item.type}
+                                                            </span>
+                                                            <span>
+                                                                {formatFileSize(
+                                                                    item.size,
+                                                                )}
+                                                            </span>
+                                                        </span>
+                                                    </span>
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+                                ) : (
+                                    <div className="rounded-lg border border-dashed border-zinc-800 bg-zinc-950 px-4 py-8 text-center">
+                                        <Upload className="mx-auto mb-3 size-6 text-zinc-500" />
+                                        <p className="text-sm font-medium text-zinc-300">
+                                            No media uploaded yet
+                                        </p>
+                                        <p className="mt-1 text-xs leading-5 text-zinc-500">
+                                            {uploadLimits}
+                                        </p>
+                                    </div>
+                                )}
                             </section>
 
                             <section className="border-t border-zinc-800 p-4">
