@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Head, useForm } from '@inertiajs/react';
+import { Head, Link, useForm } from '@inertiajs/react';
 import {
     Clapperboard,
     Film,
@@ -416,6 +416,13 @@ export default function Dashboard({ projects }: DashboardProps) {
                                 </dl>
 
                                 <DialogFooter>
+                                    <Button asChild>
+                                        <Link
+                                            href={`/projects/${selectedProject.id}/edit`}
+                                        >
+                                            Open editor
+                                        </Link>
+                                    </Button>
                                     <Button
                                         type="button"
                                         variant="outline"

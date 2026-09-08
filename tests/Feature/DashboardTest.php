@@ -39,6 +39,56 @@ test('dashboard shows only the current users projects', function () {
         );
 });
 
+test('users can open their own project editor', function () {
+    $user = User::factory()->create();
+    $project = Project::factory()->for($user)->create([
+        'name' => 'Editor project',
+    ]);
+
+    $this->actingAs($user)
+        ->get(route('projects.edit', $project))
+        ->assertInertia(fn (Assert $page) => $page
+            ->component('projects/editor')
+            ->where('project.id', $project->id)
+            ->where('project.name', 'Editor project'),
+        );
+});
+
+test('users cannot open another users project editor', function () {
+    $user = User::factory()->create();
+    $otherUser = User::factory()->create();
+    $project = Project::factory()->for($otherUser)->create();
+
+    $this->actingAs($user)
+        ->get(route('projects.edit', $project))
+        ->assertNotFound();
+});
+
+test('users can open their own project export page', function () {
+    $user = User::factory()->create();
+    $project = Project::factory()->for($user)->create([
+        'name' => 'Export project',
+    ]);
+
+    $this->actingAs($user)
+        ->get(route('projects.export', $project))
+        ->assertInertia(fn (Assert $page) => $page
+            ->component('projects/export')
+            ->where('project.id', $project->id)
+            ->where('project.name', 'Export project'),
+        );
+});
+
+test('users cannot open another users project export page', function () {
+    $user = User::factory()->create();
+    $otherUser = User::factory()->create();
+    $project = Project::factory()->for($otherUser)->create();
+
+    $this->actingAs($user)
+        ->get(route('projects.export', $project))
+        ->assertNotFound();
+});
+
 test('users can create a project', function () {
     $user = User::factory()->create();
 

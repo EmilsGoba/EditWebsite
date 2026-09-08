@@ -27,6 +27,46 @@ class ProjectController extends Controller
     }
 
     /**
+     * Show the temporary editing workspace for one project.
+     */
+    public function edit(Request $request, Project $project): Response
+    {
+        $project = $request->user()
+            ->projects()
+            ->findOrFail($project->id);
+
+        return Inertia::render('projects/editor', [
+            'project' => $project->only([
+                'id',
+                'name',
+                'format',
+                'status',
+                'created_at',
+            ]),
+        ]);
+    }
+
+    /**
+     * Show the temporary export page for one project.
+     */
+    public function export(Request $request, Project $project): Response
+    {
+        $project = $request->user()
+            ->projects()
+            ->findOrFail($project->id);
+
+        return Inertia::render('projects/export', [
+            'project' => $project->only([
+                'id',
+                'name',
+                'format',
+                'status',
+                'created_at',
+            ]),
+        ]);
+    }
+
+    /**
      * Save a new project to the database.
      */
     public function store(Request $request): RedirectResponse
