@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Head, Link, router } from '@inertiajs/react';
 import {
     ArrowLeft,
@@ -43,23 +43,68 @@ type ProjectMedia = {
     created_at: string;
 };
 
-const timelineClips = [
-    { id: 1, name: 'Intro shot', width: '22%', color: 'bg-cyan-500' },
-    { id: 2, name: 'Main clip', width: '38%', color: 'bg-orange-500' },
-    { id: 3, name: 'B-roll', width: '24%', color: 'bg-emerald-500' },
-];
+type TimelineClip = {
+    id: number;
+    mediaId: number;
+    name: string;
+    type: ProjectMedia['type'];
+    start: number;
+    duration: number;
+    sourceStart: number;
+    color: string;
+    url: string;
+};
 
 const effectItems = ['Fade in', 'Blur', 'Color boost', 'Black and white'];
 const uploadLimits =
     'Videos up to 500 MB, images up to 10 MB, audio up to 50 MB.';
+const timelineBaseWidth = 1100;
+const timelineSeconds = 80;
+const timelineStepSeconds = 0.01;
+const timelinePlaybackStepSeconds = 0.02;
+const timelinePlaybackIntervalMs = 20;
+const visibleTimelineIntervalSeconds = 0.1;
+
+function getTemporaryClipDuration(type: ProjectMedia['type']) {
+    if (type === 'image') {
+        return 5;
+    }
+
+    if (type === 'audio') {
+        return 12;
+    }
+
+    return 10;
+}
+
+function getTimelineColor(type: ProjectMedia['type']) {
+    if (type === 'audio') {
+        return 'bg-emerald-700/80';
+    }
+
+    if (type === 'image') {
+        return 'bg-cyan-500';
+    }
+
+    return 'bg-orange-500';
+}
 
 export default function Editor({ project, media }: EditorProps) {
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const previewVideoRef = useRef<HTMLVideoElement>(null);
     const [isPlaying, setIsPlaying] = useState(false);
     const [isUploading, setIsUploading] = useState(false);
     const [uploadError, setUploadError] = useState<string | null>(null);
     const [isDeletingMedia, setIsDeletingMedia] = useState(false);
     const [selectedMediaIds, setSelectedMediaIds] = useState<number[]>([]);
+    const [mediaDurations, setMediaDurations] = useState<
+        Record<number, number>
+    >({});
+    const [timelineClips, setTimelineClips] = useState<TimelineClip[]>([]);
+    const [history, setHistory] = useState<TimelineClip[][]>([[]]);
+    const [historyIndex, setHistoryIndex] = useState(0);
+    const [selectedClipId, setSelectedClipId] = useState<number | null>(null);
+    const [playhead, setPlayhead] = useState(0);
     const [selectedTool, setSelectedTool] = useState<'select' | 'cut'>(
         'select',
     );
@@ -102,6 +147,110 @@ export default function Editor({ project, media }: EditorProps) {
         };
     }, [project.format]);
 
+    const timelineWidth = useMemo(
+        () => timelineBaseWidth + timelineZoom * 20,
+        [timelineZoom],
+    );
+
+    const activeClip = useMemo(() => {
+        return timelineClips.find(
+            (clip) =>
+                clip.type !== 'audio' &&
+                playhead >= clip.start &&
+                playhead < clip.start + clip.duration,
+        );
+    }, [playhead, timelineClips]);
+
+    const selectedClip = useMemo(() => {
+        return timelineClips.find((clip) => clip.id === selectedClipId) ?? null;
+    }, [selectedClipId, timelineClips]);
+
+    const timelineMarks = useMemo(
+        () => Array.from({ length: 9 }, (_, index) => index * 10),
+        [],
+    );
+
+    const timelineIntervals = useMemo(
+        () =>
+            Array.from(
+                {
+                    length:
+                        Math.floor(
+                            timelineSeconds / visibleTimelineIntervalSeconds,
+                        ) + 1,
+                },
+                (_, index) =>
+                    Number((index * visibleTimelineIntervalSeconds).toFixed(1)),
+            ),
+        [],
+    );
+
+    useEffect(() => {
+        if (!isPlaying || activeClip?.type === 'video') {
+            return;
+        }
+
+        const timer = window.setInterval(() => {
+            setPlayhead((currentTime) => {
+                if (currentTime >= timelineSeconds) {
+                    setIsPlaying(false);
+                    return timelineSeconds;
+                }
+
+                return snapToTimelineStep(
+                    Math.min(
+                        timelineSeconds,
+                        currentTime + timelinePlaybackStepSeconds,
+                    ),
+                );
+            });
+        }, timelinePlaybackIntervalMs);
+
+        return () => window.clearInterval(timer);
+    }, [activeClip?.type, isPlaying]);
+
+    useEffect(() => {
+        const previewVideo = previewVideoRef.current;
+
+        if (!previewVideo || activeClip?.type !== 'video') {
+            return;
+        }
+
+        const clipTime = Math.max(
+            0,
+            activeClip.sourceStart + playhead - activeClip.start,
+        );
+
+        if (
+            !isPlaying &&
+            Math.abs(previewVideo.currentTime - clipTime) > 0.08
+        ) {
+            previewVideo.currentTime = clipTime;
+        }
+
+        if (isPlaying) {
+            // Browsers allow muted video playback, so this connects our timeline play button to the preview.
+            if (previewVideo.paused) {
+                void previewVideo.play();
+            }
+        } else {
+            previewVideo.pause();
+        }
+    }, [activeClip, isPlaying, playhead]);
+
+    useEffect(() => {
+        if (!isPlaying || activeClip?.type !== 'video') {
+            return;
+        }
+
+        const timer = window.setInterval(
+            updatePlayheadFromPreviewVideo,
+            timelinePlaybackIntervalMs,
+        );
+
+        return () => window.clearInterval(timer);
+    }, [activeClip, isPlaying]);
+
     function getMediaIcon(type: ProjectMedia['type']) {
         if (type === 'image') {
             return Image;
@@ -137,6 +286,184 @@ export default function Editor({ project, media }: EditorProps) {
         }
 
         return `${Math.max(1, Math.round(size / 1024))} KB`;
+    }
+
+    function formatTimelineTime(seconds: number) {
+        const minutes = Math.floor(seconds / 60)
+            .toString()
+            .padStart(2, '0');
+        const remainingSeconds = Math.floor(seconds % 60)
+            .toString()
+            .padStart(2, '0');
+        const milliseconds = Math.round((seconds % 1) * 1000)
+            .toString()
+            .padStart(3, '0');
+
+        return `${minutes}:${remainingSeconds}.${milliseconds}`;
+    }
+
+    function formatShortDuration(seconds: number) {
+        if (seconds < 60) {
+            return `${seconds.toFixed(2)}s`;
+        }
+
+        return formatTimelineTime(seconds);
+    }
+
+    function snapToTimelineStep(seconds: number) {
+        // The timeline uses 10 millisecond precision, so cuts land on clean 0.01s points.
+        return Math.round(seconds / timelineStepSeconds) * timelineStepSeconds;
+    }
+
+    function secondsToPixels(seconds: number) {
+        return (seconds / timelineSeconds) * timelineWidth;
+    }
+
+    function pixelsToSeconds(pixels: number) {
+        const seconds = Math.max(
+            0,
+            Math.min(
+                timelineSeconds,
+                (pixels / timelineWidth) * timelineSeconds,
+            ),
+        );
+
+        return snapToTimelineStep(seconds);
+    }
+
+    function saveTimelineChange(nextClips: TimelineClip[]) {
+        // Every timeline edit is stored in a small local history, which powers undo and redo.
+        const nextHistory = history.slice(0, historyIndex + 1);
+
+        nextHistory.push(nextClips);
+        setHistory(nextHistory);
+        setHistoryIndex(nextHistory.length - 1);
+        setTimelineClips(nextClips);
+    }
+
+    function getTrackEnd(type: ProjectMedia['type']) {
+        return timelineClips
+            .filter((clip) =>
+                type === 'audio'
+                    ? clip.type === 'audio'
+                    : clip.type !== 'audio',
+            )
+            .reduce(
+                (latestEnd, clip) =>
+                    Math.max(latestEnd, clip.start + clip.duration),
+                0,
+            );
+    }
+
+    function rememberMediaDuration(mediaId: number, duration: number) {
+        if (!Number.isFinite(duration) || duration <= 0) {
+            return;
+        }
+
+        setMediaDurations((currentDurations) => ({
+            ...currentDurations,
+            [mediaId]: snapToTimelineStep(duration),
+        }));
+    }
+
+    function addMediaToTimeline(item: ProjectMedia) {
+        if (isDeletingMedia) {
+            toggleSelectedMedia(item.id);
+            return;
+        }
+
+        const nextClip: TimelineClip = {
+            id: Date.now(),
+            mediaId: item.id,
+            name: item.name,
+            type: item.type,
+            start: getTrackEnd(item.type),
+            duration:
+                mediaDurations[item.id] ?? getTemporaryClipDuration(item.type),
+            sourceStart: 0,
+            color: getTimelineColor(item.type),
+            url: item.url,
+        };
+
+        saveTimelineChange([...timelineClips, nextClip]);
+        setSelectedClipId(nextClip.id);
+        setIsPlaying(false);
+        setPlayhead(nextClip.start);
+    }
+
+    function selectTimelineClip(clip: TimelineClip) {
+        setSelectedClipId(clip.id);
+        setIsPlaying(false);
+        setPlayhead(clip.start);
+    }
+
+    function movePlayhead(event: React.MouseEvent<HTMLDivElement>) {
+        const bounds = event.currentTarget.getBoundingClientRect();
+        const nextTime = pixelsToSeconds(event.clientX - bounds.left);
+
+        setIsPlaying(false);
+        setPlayhead(nextTime);
+    }
+
+    function updatePlayheadFromPreviewVideo() {
+        const previewVideo = previewVideoRef.current;
+
+        if (!previewVideo || activeClip?.type !== 'video') {
+            return;
+        }
+
+        const nextTime = snapToTimelineStep(
+            activeClip.start +
+                previewVideo.currentTime -
+                activeClip.sourceStart,
+        );
+        const clipEnd = activeClip.start + activeClip.duration;
+
+        if (nextTime >= clipEnd) {
+            previewVideo.pause();
+            setIsPlaying(false);
+            setPlayhead(snapToTimelineStep(clipEnd));
+            return;
+        }
+
+        setPlayhead(nextTime);
+    }
+
+    function cutSelectedClip() {
+        const clip = selectedClip;
+
+        if (!clip) {
+            return;
+        }
+
+        const cutOffset = playhead - clip.start;
+
+        if (cutOffset <= 0.25 || cutOffset >= clip.duration - 0.25) {
+            return;
+        }
+
+        const firstPart: TimelineClip = {
+            ...clip,
+            duration: cutOffset,
+        };
+        const secondPart: TimelineClip = {
+            ...clip,
+            id: Date.now(),
+            name: `${clip.name} cut`,
+            start: playhead,
+            duration: clip.duration - cutOffset,
+            sourceStart: clip.sourceStart + cutOffset,
+        };
+
+        saveTimelineChange(
+            timelineClips
+                .map((currentClip) =>
+                    currentClip.id === clip.id ? firstPart : currentClip,
+                )
+                .concat(secondPart)
+                .sort((first, second) => first.start - second.start),
+        );
+        setSelectedClipId(secondPart.id);
     }
 
     function openMediaPicker() {
@@ -231,11 +558,29 @@ export default function Editor({ project, media }: EditorProps) {
     }
 
     function undoTemporaryChange() {
-        // Temporary toolbar action until the editor has real edit history.
+        // Move one step back through local timeline edits.
+        const nextIndex = historyIndex - 1;
+
+        if (nextIndex < 0) {
+            return;
+        }
+
+        setHistoryIndex(nextIndex);
+        setTimelineClips(history[nextIndex]);
+        setSelectedClipId(null);
     }
 
     function redoTemporaryChange() {
-        // Temporary toolbar action until the editor has real edit history.
+        // Move one step forward through local timeline edits.
+        const nextIndex = historyIndex + 1;
+
+        if (nextIndex >= history.length) {
+            return;
+        }
+
+        setHistoryIndex(nextIndex);
+        setTimelineClips(history[nextIndex]);
+        setSelectedClipId(null);
     }
 
     function resetResizeControls() {
@@ -379,13 +724,9 @@ export default function Editor({ project, media }: EditorProps) {
                                                             : 'border-zinc-800'
                                                     }`}
                                                     key={item.id}
-                                                    onClick={() => {
-                                                        if (isDeletingMedia) {
-                                                            toggleSelectedMedia(
-                                                                item.id,
-                                                            );
-                                                        }
-                                                    }}
+                                                    onClick={() =>
+                                                        addMediaToTimeline(item)
+                                                    }
                                                     type="button"
                                                 >
                                                     {isDeletingMedia && (
@@ -422,6 +763,16 @@ export default function Editor({ project, media }: EditorProps) {
                                                             <video
                                                                 className="size-full object-cover transition group-hover:scale-105"
                                                                 muted
+                                                                onLoadedMetadata={(
+                                                                    event,
+                                                                ) =>
+                                                                    rememberMediaDuration(
+                                                                        item.id,
+                                                                        event
+                                                                            .currentTarget
+                                                                            .duration,
+                                                                    )
+                                                                }
                                                                 playsInline
                                                                 preload="metadata"
                                                                 src={item.url}
@@ -441,9 +792,18 @@ export default function Editor({ project, media }: EditorProps) {
                                                                 {item.type}
                                                             </span>
                                                             <span>
-                                                                {formatFileSize(
-                                                                    item.size,
-                                                                )}
+                                                                {mediaDurations[
+                                                                    item.id
+                                                                ]
+                                                                    ? formatShortDuration(
+                                                                          mediaDurations[
+                                                                              item
+                                                                                  .id
+                                                                          ],
+                                                                      )
+                                                                    : formatFileSize(
+                                                                          item.size,
+                                                                      )}
                                                             </span>
                                                         </span>
                                                     </span>
@@ -513,17 +873,46 @@ export default function Editor({ project, media }: EditorProps) {
                                             transform: `translate(${positionX}px, ${positionY}px) rotate(${rotation}deg) scale(${scale / 100})`,
                                         }}
                                     >
-                                        <div className="flex size-full items-center justify-center bg-zinc-900">
-                                            <div>
-                                                <Film className="mx-auto mb-4 size-16 text-cyan-400/80" />
-                                                <p className="text-lg font-semibold text-white">
-                                                    {previewLabel}
-                                                </p>
-                                                <p className="mt-1 text-sm text-zinc-500">
-                                                    Video preview placeholder
-                                                </p>
+                                        {activeClip?.type === 'image' ? (
+                                            <img
+                                                alt={activeClip.name}
+                                                className="size-full object-cover"
+                                                src={activeClip.url}
+                                            />
+                                        ) : activeClip?.type === 'video' ? (
+                                            <video
+                                                ref={previewVideoRef}
+                                                className="size-full object-cover"
+                                                muted
+                                                onEnded={() =>
+                                                    setIsPlaying(false)
+                                                }
+                                                onTimeUpdate={
+                                                    updatePlayheadFromPreviewVideo
+                                                }
+                                                playsInline
+                                                preload="metadata"
+                                                src={activeClip.url}
+                                            >
+                                                <track kind="captions" />
+                                            </video>
+                                        ) : (
+                                            <div className="flex size-full items-center justify-center bg-zinc-900">
+                                                <div>
+                                                    <Film className="mx-auto mb-4 size-16 text-cyan-400/80" />
+                                                    <p className="text-lg font-semibold text-white">
+                                                        {activeClip
+                                                            ? activeClip.name
+                                                            : previewLabel}
+                                                    </p>
+                                                    <p className="mt-1 text-sm text-zinc-500">
+                                                        {activeClip
+                                                            ? 'Current timeline clip'
+                                                            : 'Add media to the timeline'}
+                                                    </p>
+                                                </div>
                                             </div>
-                                        </div>
+                                        )}
                                     </div>
                                 </div>
                             </div>
@@ -749,7 +1138,7 @@ export default function Editor({ project, media }: EditorProps) {
                                         </span>
                                     </Button>
                                     <span className="font-mono text-sm text-zinc-400">
-                                        00:00:00
+                                        {formatTimelineTime(playhead)}
                                     </span>
                                 </div>
 
@@ -758,6 +1147,7 @@ export default function Editor({ project, media }: EditorProps) {
                                         size="icon"
                                         variant="outline"
                                         className="border-zinc-700 bg-zinc-950 text-zinc-200 hover:bg-zinc-800"
+                                        disabled={historyIndex === 0}
                                         onClick={undoTemporaryChange}
                                         title="Undo"
                                         type="button"
@@ -769,6 +1159,9 @@ export default function Editor({ project, media }: EditorProps) {
                                         size="icon"
                                         variant="outline"
                                         className="border-zinc-700 bg-zinc-950 text-zinc-200 hover:bg-zinc-800"
+                                        disabled={
+                                            historyIndex >= history.length - 1
+                                        }
                                         onClick={redoTemporaryChange}
                                         title="Redo"
                                         type="button"
@@ -793,7 +1186,10 @@ export default function Editor({ project, media }: EditorProps) {
                                                 ? 'default'
                                                 : 'outline'
                                         }
-                                        onClick={() => selectTool('cut')}
+                                        onClick={() => {
+                                            selectTool('cut');
+                                            cutSelectedClip();
+                                        }}
                                     >
                                         <Scissors className="size-4" />
                                         Cut
@@ -801,10 +1197,12 @@ export default function Editor({ project, media }: EditorProps) {
                                 </div>
 
                                 <label className="flex items-center gap-3 text-sm text-zinc-400">
-                                    Timeline zoom
+                                    <span className="min-w-30">
+                                        Timeline zoom {timelineZoom}%
+                                    </span>
                                     <input
-                                        className="w-36 accent-cyan-500"
-                                        max="100"
+                                        className="w-56 accent-cyan-500"
+                                        max="500"
                                         min="0"
                                         onChange={(event) =>
                                             setTimelineZoom(
@@ -818,20 +1216,24 @@ export default function Editor({ project, media }: EditorProps) {
                             </div>
 
                             <div className="overflow-x-auto">
-                                <div className="min-w-[1100px]">
+                                <div
+                                    className="min-w-[1100px]"
+                                    style={{ width: timelineWidth }}
+                                >
                                     <div className="grid grid-cols-[92px_1fr] border-b border-zinc-800 bg-zinc-950 text-xs font-medium text-zinc-500">
                                         <div className="border-r border-zinc-800 p-3">
                                             Track
                                         </div>
                                         <div className="grid grid-cols-8 p-3 font-mono">
-                                            <span>00:00</span>
-                                            <span>00:10</span>
-                                            <span>00:20</span>
-                                            <span>00:30</span>
-                                            <span>00:40</span>
-                                            <span>00:50</span>
-                                            <span>01:00</span>
-                                            <span>01:10</span>
+                                            {timelineMarks
+                                                .slice(0, -1)
+                                                .map((mark) => (
+                                                    <span key={mark}>
+                                                        {formatTimelineTime(
+                                                            mark,
+                                                        )}
+                                                    </span>
+                                                ))}
                                         </div>
                                     </div>
 
@@ -839,21 +1241,77 @@ export default function Editor({ project, media }: EditorProps) {
                                         <div className="border-r border-zinc-800 p-3 text-xs text-zinc-500">
                                             Video 1
                                         </div>
-                                        <div className="relative flex min-h-24 items-center gap-2 p-3">
-                                            <div className="absolute top-0 bottom-0 left-[48%] w-px bg-red-500" />
-                                            {timelineClips.map((clip) => (
-                                                <div
-                                                    className={`${clip.color} flex h-14 min-w-28 items-center rounded px-3 text-sm font-medium text-white`}
-                                                    key={clip.id}
-                                                    style={{
-                                                        width: clip.width,
-                                                    }}
-                                                >
-                                                    <span className="truncate">
-                                                        {clip.name}
-                                                    </span>
+                                        <div
+                                            className="relative min-h-24 cursor-crosshair p-3"
+                                            onClick={movePlayhead}
+                                        >
+                                            {timelineIntervals.map(
+                                                (interval) => (
+                                                    <div
+                                                        className={`pointer-events-none absolute top-0 bottom-0 w-px ${
+                                                            interval % 1 === 0
+                                                                ? 'bg-zinc-700/60'
+                                                                : 'bg-zinc-800/35'
+                                                        }`}
+                                                        key={`video-${interval}`}
+                                                        style={{
+                                                            left: secondsToPixels(
+                                                                interval,
+                                                            ),
+                                                        }}
+                                                    />
+                                                ),
+                                            )}
+                                            <div
+                                                className="absolute top-0 bottom-0 z-20 w-px bg-red-500"
+                                                style={{
+                                                    left: secondsToPixels(
+                                                        playhead,
+                                                    ),
+                                                }}
+                                            />
+                                            {timelineClips
+                                                .filter(
+                                                    (clip) =>
+                                                        clip.type !== 'audio',
+                                                )
+                                                .map((clip) => (
+                                                    <button
+                                                        className={`${clip.color} absolute top-3 flex h-14 items-center rounded px-3 text-left text-sm font-medium text-white ${
+                                                            selectedClipId ===
+                                                            clip.id
+                                                                ? 'ring-2 ring-cyan-300'
+                                                                : ''
+                                                        }`}
+                                                        key={clip.id}
+                                                        onClick={(event) => {
+                                                            event.stopPropagation();
+                                                            selectTimelineClip(
+                                                                clip,
+                                                            );
+                                                        }}
+                                                        style={{
+                                                            left: secondsToPixels(
+                                                                clip.start,
+                                                            ),
+                                                            width: secondsToPixels(
+                                                                clip.duration,
+                                                            ),
+                                                        }}
+                                                        type="button"
+                                                    >
+                                                        <span className="truncate">
+                                                            {clip.name}
+                                                        </span>
+                                                    </button>
+                                                ))}
+                                            {timelineClips.filter(
+                                                (clip) => clip.type !== 'audio',
+                                            ).length === 0 && (
+                                                <div className="flex h-14 items-center justify-center rounded border border-dashed border-zinc-800 text-xs text-zinc-600">
+                                                    Click media to add clips
                                                 </div>
-                                            ))}
+                                            )}
                                         </div>
                                     </div>
 
@@ -861,8 +1319,77 @@ export default function Editor({ project, media }: EditorProps) {
                                         <div className="border-r border-zinc-800 p-3 text-xs text-zinc-500">
                                             Audio 1
                                         </div>
-                                        <div className="flex min-h-16 items-center p-3">
-                                            <div className="h-9 w-2/3 rounded bg-emerald-700/80" />
+                                        <div
+                                            className="relative min-h-16 cursor-crosshair p-3"
+                                            onClick={movePlayhead}
+                                        >
+                                            {timelineIntervals.map(
+                                                (interval) => (
+                                                    <div
+                                                        className={`pointer-events-none absolute top-0 bottom-0 w-px ${
+                                                            interval % 1 === 0
+                                                                ? 'bg-zinc-700/60'
+                                                                : 'bg-zinc-800/35'
+                                                        }`}
+                                                        key={`audio-${interval}`}
+                                                        style={{
+                                                            left: secondsToPixels(
+                                                                interval,
+                                                            ),
+                                                        }}
+                                                    />
+                                                ),
+                                            )}
+                                            <div
+                                                className="absolute top-0 bottom-0 z-20 w-px bg-red-500"
+                                                style={{
+                                                    left: secondsToPixels(
+                                                        playhead,
+                                                    ),
+                                                }}
+                                            />
+                                            {timelineClips
+                                                .filter(
+                                                    (clip) =>
+                                                        clip.type === 'audio',
+                                                )
+                                                .map((clip) => (
+                                                    <button
+                                                        className={`${clip.color} absolute top-3 flex h-9 items-center rounded px-3 text-left text-sm font-medium text-white ${
+                                                            selectedClipId ===
+                                                            clip.id
+                                                                ? 'ring-2 ring-cyan-300'
+                                                                : ''
+                                                        }`}
+                                                        key={clip.id}
+                                                        onClick={(event) => {
+                                                            event.stopPropagation();
+                                                            selectTimelineClip(
+                                                                clip,
+                                                            );
+                                                        }}
+                                                        style={{
+                                                            left: secondsToPixels(
+                                                                clip.start,
+                                                            ),
+                                                            width: secondsToPixels(
+                                                                clip.duration,
+                                                            ),
+                                                        }}
+                                                        type="button"
+                                                    >
+                                                        <span className="truncate">
+                                                            {clip.name}
+                                                        </span>
+                                                    </button>
+                                                ))}
+                                            {timelineClips.filter(
+                                                (clip) => clip.type === 'audio',
+                                            ).length === 0 && (
+                                                <div className="flex h-9 items-center justify-center rounded border border-dashed border-zinc-800 text-xs text-zinc-600">
+                                                    Click audio to add it here
+                                                </div>
+                                            )}
                                         </div>
                                     </div>
                                 </div>
