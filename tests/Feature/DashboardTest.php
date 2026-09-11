@@ -2,6 +2,7 @@
 
 use App\Models\Project;
 use App\Models\ProjectMedia;
+use App\Models\ProjectTimelineClip;
 use App\Models\User;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
@@ -55,6 +56,15 @@ test('users can open their own project editor', function () {
         'mime_type' => 'video/mp4',
         'size' => 1024,
     ]);
+    $clip = $project->timelineClips()->create([
+        'project_media_id' => $media->id,
+        'type' => 'video',
+        'name' => 'lesson-video.mp4',
+        'start' => 0,
+        'duration' => 7,
+        'source_start' => 0,
+        'sort_order' => 0,
+    ]);
 
     $this->actingAs($user)
         ->get(route('projects.edit', $project))
@@ -64,7 +74,11 @@ test('users can open their own project editor', function () {
             ->where('project.name', 'Editor project')
             ->has('media', 1)
             ->where('media.0.id', $media->id)
-            ->where('media.0.name', 'lesson-video.mp4'),
+            ->where('media.0.name', 'lesson-video.mp4')
+            ->has('timelineClips', 1)
+            ->where('timelineClips.0.id', $clip->id)
+            ->where('timelineClips.0.mediaId', $media->id)
+            ->where('timelineClips.0.duration', 7),
         );
 });
 
@@ -336,6 +350,123 @@ test('users cannot delete media through another users project', function () {
         'id' => $media->id,
     ]);
     Storage::disk('public')->assertExists($media->path);
+});
+
+test('users can save their project timeline', function () {
+    $user = User::factory()->create();
+    $project = Project::factory()->for($user)->create();
+    $media = $project->media()->create([
+        'type' => 'video',
+        'original_name' => 'timeline-video.mp4',
+        'path' => 'projects/'.$project->id.'/media/timeline-video.mp4',
+        'disk' => 'public',
+        'mime_type' => 'video/mp4',
+        'size' => 1024,
+    ]);
+
+    $this->actingAs($user)
+        ->put(route('projects.timeline.save', $project), [
+            'clips' => [
+                [
+                    'mediaId' => $media->id,
+                    'name' => 'timeline-video.mp4',
+                    'type' => 'video',
+                    'start' => 0.5,
+                    'duration' => 7.25,
+                    'sourceStart' => 0,
+                ],
+            ],
+        ])
+        ->assertSessionHasNoErrors()
+        ->assertRedirect(route('projects.edit', $project));
+
+    $this->assertDatabaseHas('project_timeline_clips', [
+        'project_id' => $project->id,
+        'project_media_id' => $media->id,
+        'name' => 'timeline-video.mp4',
+        'type' => 'video',
+        'start' => 0.5,
+        'duration' => 7.25,
+        'source_start' => 0,
+    ]);
+});
+
+test('saving a project timeline replaces old clips', function () {
+    $user = User::factory()->create();
+    $project = Project::factory()->for($user)->create();
+    $media = $project->media()->create([
+        'type' => 'image',
+        'original_name' => 'cover.jpg',
+        'path' => 'projects/'.$project->id.'/media/cover.jpg',
+        'disk' => 'public',
+        'mime_type' => 'image/jpeg',
+        'size' => 1024,
+    ]);
+    $oldClip = $project->timelineClips()->create([
+        'project_media_id' => $media->id,
+        'type' => 'image',
+        'name' => 'old-cover.jpg',
+        'start' => 0,
+        'duration' => 5,
+        'source_start' => 0,
+        'sort_order' => 0,
+    ]);
+
+    $this->actingAs($user)
+        ->put(route('projects.timeline.save', $project), [
+            'clips' => [
+                [
+                    'mediaId' => $media->id,
+                    'name' => 'cover.jpg',
+                    'type' => 'image',
+                    'start' => 2,
+                    'duration' => 4,
+                    'sourceStart' => 0,
+                ],
+            ],
+        ])
+        ->assertSessionHasNoErrors();
+
+    $this->assertDatabaseMissing('project_timeline_clips', [
+        'id' => $oldClip->id,
+    ]);
+    $this->assertDatabaseHas('project_timeline_clips', [
+        'project_id' => $project->id,
+        'name' => 'cover.jpg',
+        'start' => 2,
+        'duration' => 4,
+    ]);
+});
+
+test('users cannot save another users project timeline', function () {
+    $user = User::factory()->create();
+    $otherUser = User::factory()->create();
+    $project = Project::factory()->for($otherUser)->create();
+    $media = $project->media()->create([
+        'type' => 'audio',
+        'original_name' => 'private.mp3',
+        'path' => 'projects/'.$project->id.'/media/private.mp3',
+        'disk' => 'public',
+        'mime_type' => 'audio/mpeg',
+        'size' => 1024,
+    ]);
+
+    $this->actingAs($user)
+        ->put(route('projects.timeline.save', $project), [
+            'clips' => [
+                [
+                    'mediaId' => $media->id,
+                    'name' => 'private.mp3',
+                    'type' => 'audio',
+                    'start' => 0,
+                    'duration' => 12,
+                    'sourceStart' => 0,
+                ],
+            ],
+        ])
+        ->assertNotFound();
+
+    expect(ProjectTimelineClip::count())->toBe(0);
 });
 
 test('users can delete their own project', function () {

@@ -56,6 +56,20 @@ class ProjectController extends Controller
                     'url' => Storage::disk($media->disk)->url($media->path),
                     'created_at' => $media->created_at,
                 ]),
+            'timelineClips' => $project->timelineClips()
+                ->with('media')
+                ->orderBy('sort_order')
+                ->get()
+                ->map(fn ($clip) => [
+                    'id' => $clip->id,
+                    'mediaId' => $clip->project_media_id,
+                    'name' => $clip->name,
+                    'type' => $clip->type,
+                    'start' => (float) $clip->start,
+                    'duration' => (float) $clip->duration,
+                    'sourceStart' => (float) $clip->source_start,
+                    'url' => Storage::disk($clip->media->disk)->url($clip->media->path),
+                ]),
         ]);
     }
 
@@ -212,6 +226,54 @@ class ProjectController extends Controller
         Inertia::flash('toast', [
             'type' => 'success',
             'message' => __('Media deleted.'),
+        ]);
+
+        return to_route('projects.edit', $project);
+    }
+
+    /**
+     * Save the current editor timeline for a project.
+     */
+    public function saveTimeline(Request $request, Project $project): RedirectResponse
+    {
+        $project = $request->user()->projects()->findOrFail($project->id);
+
+        $validated = $request->validate([
+            'clips' => ['array'],
+            'clips.*.mediaId' => ['required', 'integer'],
+            'clips.*.name' => ['required', 'string', 'max:255'],
+            'clips.*.type' => ['required', Rule::in(['video', 'image', 'audio'])],
+            'clips.*.start' => ['required', 'numeric', 'min:0', 'max:80'],
+            'clips.*.duration' => ['required', 'numeric', 'min:0.01', 'max:80'],
+            'clips.*.sourceStart' => ['required', 'numeric', 'min:0', 'max:80'],
+        ]);
+
+        $mediaIds = $project->media()
+            ->whereIn('id', collect($validated['clips'] ?? [])->pluck('mediaId'))
+            ->pluck('id')
+            ->all();
+
+        $project->timelineClips()->delete();
+
+        foreach ($validated['clips'] ?? [] as $index => $clip) {
+            if (! in_array($clip['mediaId'], $mediaIds)) {
+                continue;
+            }
+
+            $project->timelineClips()->create([
+                'project_media_id' => $clip['mediaId'],
+                'name' => $clip['name'],
+                'type' => $clip['type'],
+                'start' => $clip['start'],
+                'duration' => $clip['duration'],
+                'source_start' => $clip['sourceStart'],
+                'sort_order' => $index,
+            ]);
+        }
+
+        Inertia::flash('toast', [
+            'type' => 'success',
+            'message' => __('Timeline saved.'),
         ]);
 
         return to_route('projects.edit', $project);

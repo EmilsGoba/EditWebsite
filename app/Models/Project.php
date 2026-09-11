@@ -40,4 +40,12 @@ class Project extends Model
     {
         return $this->hasMany(ProjectMedia::class);
     }
+
+    /**
+     * A project can save the current clips placed on the timeline.
+     */
+    public function timelineClips(): HasMany
+    {
+        return $this->hasMany(ProjectTimelineClip::class);
+    }
 }

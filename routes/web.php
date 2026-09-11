@@ -12,6 +12,7 @@ Route::middleware(['auth', 'verified'])->group(function () {
     Route::post('projects', [ProjectController::class, 'store'])->name('projects.store');
     Route::post('projects/{project}/media', [ProjectController::class, 'uploadMedia'])->name('projects.media.store');
     Route::delete('projects/{project}/media', [ProjectController::class, 'destroyMedia'])->name('projects.media.destroy');
+    Route::put('projects/{project}/timeline', [ProjectController::class, 'saveTimeline'])->name('projects.timeline.save');
     Route::put('projects/{project}', [ProjectController::class, 'update'])->name('projects.update');
     Route::delete('projects/{project}', [ProjectController::class, 'destroy'])->name('projects.destroy');
 });

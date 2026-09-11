@@ -10,6 +10,7 @@ import {
     Play,
     RotateCcw,
     Redo2,
+    Save,
     Scissors,
     Trash2,
     Upload,
@@ -31,6 +32,7 @@ type Project = {
 type EditorProps = {
     project: Project;
     media: ProjectMedia[];
+    timelineClips: SavedTimelineClip[];
 };
 
 type ProjectMedia = {
@@ -54,6 +56,8 @@ type TimelineClip = {
     color: string;
     url: string;
 };
+
+type SavedTimelineClip = Omit<TimelineClip, 'color'>;
 
 const effectItems = ['Fade in', 'Blur', 'Color boost', 'Black and white'];
 const uploadLimits =
@@ -89,7 +93,11 @@ function getTimelineColor(type: ProjectMedia['type']) {
     return 'bg-orange-500';
 }
 
-export default function Editor({ project, media }: EditorProps) {
+export default function Editor({
+    project,
+    media,
+    timelineClips: savedTimelineClips,
+}: EditorProps) {
     const fileInputRef = useRef<HTMLInputElement>(null);
     const previewVideoRef = useRef<HTMLVideoElement>(null);
     const [isPlaying, setIsPlaying] = useState(false);
@@ -100,11 +108,24 @@ export default function Editor({ project, media }: EditorProps) {
     const [mediaDurations, setMediaDurations] = useState<
         Record<number, number>
     >({});
-    const [timelineClips, setTimelineClips] = useState<TimelineClip[]>([]);
-    const [history, setHistory] = useState<TimelineClip[][]>([[]]);
+    const initialTimelineClips = useMemo(
+        () =>
+            savedTimelineClips.map((clip) => ({
+                ...clip,
+                color: getTimelineColor(clip.type),
+            })),
+        [savedTimelineClips],
+    );
+    const [timelineClips, setTimelineClips] =
+        useState<TimelineClip[]>(initialTimelineClips);
+    const [history, setHistory] = useState<TimelineClip[][]>([
+        initialTimelineClips,
+    ]);
     const [historyIndex, setHistoryIndex] = useState(0);
     const [selectedClipId, setSelectedClipId] = useState<number | null>(null);
     const [playhead, setPlayhead] = useState(0);
+    const [isSavingTimeline, setIsSavingTimeline] = useState(false);
+    const [saveStatus, setSaveStatus] = useState<'saved' | 'unsaved'>('saved');
     const [selectedTool, setSelectedTool] = useState<'select' | 'cut'>(
         'select',
     );
@@ -339,6 +360,31 @@ export default function Editor({ project, media }: EditorProps) {
         setHistory(nextHistory);
         setHistoryIndex(nextHistory.length - 1);
         setTimelineClips(nextClips);
+        setSaveStatus('unsaved');
+    }
+
+    function saveTimeline() {
+        setIsSavingTimeline(true);
+
+        // This saves the current timeline layout to MySQL, so it can load again after refresh.
+        router.put(
+            `/projects/${project.id}/timeline`,
+            {
+                clips: timelineClips.map((clip) => ({
+                    mediaId: clip.mediaId,
+                    name: clip.name,
+                    type: clip.type,
+                    start: clip.start,
+                    duration: clip.duration,
+                    sourceStart: clip.sourceStart,
+                })),
+            },
+            {
+                preserveScroll: true,
+                onSuccess: () => setSaveStatus('saved'),
+                onFinish: () => setIsSavingTimeline(false),
+            },
+        );
     }
 
     function getTrackEnd(type: ProjectMedia['type']) {
@@ -568,6 +614,7 @@ export default function Editor({ project, media }: EditorProps) {
         setHistoryIndex(nextIndex);
         setTimelineClips(history[nextIndex]);
         setSelectedClipId(null);
+        setSaveStatus('unsaved');
     }
 
     function redoTemporaryChange() {
@@ -581,6 +628,7 @@ export default function Editor({ project, media }: EditorProps) {
         setHistoryIndex(nextIndex);
         setTimelineClips(history[nextIndex]);
         setSelectedClipId(null);
+        setSaveStatus('unsaved');
     }
 
     function resetResizeControls() {
@@ -624,7 +672,22 @@ export default function Editor({ project, media }: EditorProps) {
                             </p>
                         </div>
 
-                        <div className="flex justify-end">
+                        <div className="flex items-center justify-end gap-2">
+                            <span className="hidden text-xs text-zinc-500 sm:inline">
+                                {saveStatus === 'saved'
+                                    ? 'Saved'
+                                    : 'Unsaved changes'}
+                            </span>
+                            <Button
+                                className="gap-2 border-zinc-700 bg-zinc-950 text-zinc-200 hover:bg-zinc-800"
+                                disabled={isSavingTimeline}
+                                onClick={saveTimeline}
+                                type="button"
+                                variant="outline"
+                            >
+                                <Save className="size-4" />
+                                {isSavingTimeline ? 'Saving' : 'Save'}
+                            </Button>
                             <Button
                                 asChild
                                 className="bg-cyan-500 text-zinc-950 hover:bg-cyan-400"
