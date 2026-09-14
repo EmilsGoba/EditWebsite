@@ -63,11 +63,15 @@ const effectItems = ['Fade in', 'Blur', 'Color boost', 'Black and white'];
 const uploadLimits =
     'Videos up to 500 MB, images up to 10 MB, audio up to 50 MB.';
 const timelineBaseWidth = 1100;
-const timelineSeconds = 80;
+const defaultTimelineSeconds = 70;
+const timelinePaddingSeconds = 10;
+const timelineMajorIntervalSeconds = 10;
 const timelineStepSeconds = 0.01;
 const timelinePlaybackStepSeconds = 0.02;
 const timelinePlaybackIntervalMs = 20;
 const visibleTimelineIntervalSeconds = 0.1;
+const mediaDragType = 'application/x-video-editor-media';
+const clipDragType = 'application/x-video-editor-clip';
 
 function getTemporaryClipDuration(type: ProjectMedia['type']) {
     if (type === 'image') {
@@ -101,6 +105,7 @@ export default function Editor({
     const fileInputRef = useRef<HTMLInputElement>(null);
     const previewVideoRef = useRef<HTMLVideoElement>(null);
     const timelineAudioRef = useRef<HTMLAudioElement>(null);
+    const timelineScrollRef = useRef<HTMLDivElement>(null);
     const [isPlaying, setIsPlaying] = useState(false);
     const [isUploading, setIsUploading] = useState(false);
     const [uploadError, setUploadError] = useState<string | null>(null);
@@ -135,6 +140,7 @@ export default function Editor({
     const [positionY, setPositionY] = useState(0);
     const [rotation, setRotation] = useState(0);
     const [timelineZoom, setTimelineZoom] = useState(50);
+    const [timelineViewportWidth, setTimelineViewportWidth] = useState(0);
 
     const previewLabel = useMemo(() => {
         if (project.format === '9:16') {
@@ -169,9 +175,36 @@ export default function Editor({
         };
     }, [project.format]);
 
+    const timelineDuration = useMemo(() => {
+        const lastClipEnd = timelineClips.reduce(
+            (lastEnd, clip) => Math.max(lastEnd, clip.start + clip.duration),
+            0,
+        );
+
+        // The timeline starts at 1:10, then grows after the last clip with a small empty work area.
+        return Math.max(
+            defaultTimelineSeconds,
+            snapToTimelineStep(lastClipEnd + timelinePaddingSeconds),
+        );
+    }, [timelineClips]);
+
+    const timelinePixelsPerSecond = useMemo(
+        () =>
+            Math.max(
+                14 + timelineZoom * 0.25,
+                timelineViewportWidth / timelineDuration,
+            ),
+        [timelineDuration, timelineViewportWidth, timelineZoom],
+    );
+
     const timelineWidth = useMemo(
-        () => timelineBaseWidth + timelineZoom * 20,
-        [timelineZoom],
+        () =>
+            Math.max(
+                timelineBaseWidth,
+                timelineViewportWidth,
+                timelineDuration * timelinePixelsPerSecond,
+            ),
+        [timelineDuration, timelinePixelsPerSecond, timelineViewportWidth],
     );
 
     const activeClip = useMemo(() => {
@@ -197,8 +230,17 @@ export default function Editor({
     }, [selectedClipId, timelineClips]);
 
     const timelineMarks = useMemo(
-        () => Array.from({ length: 9 }, (_, index) => index * 10),
-        [],
+        () =>
+            Array.from(
+                {
+                    length:
+                        Math.floor(
+                            timelineDuration / timelineMajorIntervalSeconds,
+                        ) + 1,
+                },
+                (_, index) => index * timelineMajorIntervalSeconds,
+            ),
+        [timelineDuration],
     );
 
     const timelineIntervals = useMemo(
@@ -207,13 +249,13 @@ export default function Editor({
                 {
                     length:
                         Math.floor(
-                            timelineSeconds / visibleTimelineIntervalSeconds,
+                            timelineDuration / visibleTimelineIntervalSeconds,
                         ) + 1,
                 },
                 (_, index) =>
                     Number((index * visibleTimelineIntervalSeconds).toFixed(1)),
             ),
-        [],
+        [timelineDuration],
     );
 
     useEffect(() => {
@@ -223,14 +265,14 @@ export default function Editor({
 
         const timer = window.setInterval(() => {
             setPlayhead((currentTime) => {
-                if (currentTime >= timelineSeconds) {
+                if (currentTime >= timelineDuration) {
                     setIsPlaying(false);
-                    return timelineSeconds;
+                    return timelineDuration;
                 }
 
                 return snapToTimelineStep(
                     Math.min(
-                        timelineSeconds,
+                        timelineDuration,
                         currentTime + timelinePlaybackStepSeconds,
                     ),
                 );
@@ -238,7 +280,53 @@ export default function Editor({
         }, timelinePlaybackIntervalMs);
 
         return () => window.clearInterval(timer);
-    }, [activeAudioClip, activeClip?.type, isPlaying]);
+    }, [activeAudioClip, activeClip?.type, isPlaying, timelineDuration]);
+
+    useEffect(() => {
+        const timelineScroll = timelineScrollRef.current;
+
+        if (!timelineScroll) {
+            return;
+        }
+
+        function updateTimelineViewportWidth() {
+            setTimelineViewportWidth(timelineScroll?.clientWidth ?? 0);
+        }
+
+        updateTimelineViewportWidth();
+
+        const observer = new ResizeObserver(updateTimelineViewportWidth);
+        observer.observe(timelineScroll);
+
+        return () => observer.disconnect();
+    }, []);
+
+    useEffect(() => {
+        if (playhead <= timelineDuration) {
+            return;
+        }
+
+        // When clips are deleted, the timeline can shrink. Keep the playhead inside the visible project length.
+        setIsPlaying(false);
+        setPlayhead(timelineDuration);
+    }, [playhead, timelineDuration]);
+
+    useEffect(() => {
+        const timelineScroll = timelineScrollRef.current;
+
+        if (!timelineScroll) {
+            return;
+        }
+
+        const maxScrollLeft = Math.max(
+            0,
+            timelineScroll.scrollWidth - timelineScroll.clientWidth,
+        );
+
+        if (timelineScroll.scrollLeft > maxScrollLeft) {
+            timelineScroll.scrollLeft = maxScrollLeft;
+        }
+    }, [timelineWidth]);
 
     useEffect(() => {
         const previewVideo = previewVideoRef.current;
@@ -327,7 +415,7 @@ export default function Editor({
     }, [activeAudioClip, activeClip?.type, isPlaying]);
 
     useEffect(() => {
-        function deleteClipWithKeyboard(event: KeyboardEvent) {
+        function handleTimelineKeyboard(event: KeyboardEvent) {
             const target = event.target as HTMLElement | null;
 
             if (
@@ -338,18 +426,22 @@ export default function Editor({
                 return;
             }
 
-            if (event.key !== 'Backspace') {
+            if (event.code === 'Space') {
+                event.preventDefault();
+                togglePlayback();
                 return;
             }
 
-            event.preventDefault();
-            deleteSelectedTimelineClip();
+            if (event.key === 'Backspace') {
+                event.preventDefault();
+                deleteSelectedTimelineClip();
+            }
         }
 
-        window.addEventListener('keydown', deleteClipWithKeyboard);
+        window.addEventListener('keydown', handleTimelineKeyboard);
 
         return () =>
-            window.removeEventListener('keydown', deleteClipWithKeyboard);
+            window.removeEventListener('keydown', handleTimelineKeyboard);
     }, [selectedClipId, timelineClips]);
 
     function getMediaIcon(type: ProjectMedia['type']) {
@@ -417,16 +509,13 @@ export default function Editor({
     }
 
     function secondsToPixels(seconds: number) {
-        return (seconds / timelineSeconds) * timelineWidth;
+        return seconds * timelinePixelsPerSecond;
     }
 
     function pixelsToSeconds(pixels: number) {
         const seconds = Math.max(
             0,
-            Math.min(
-                timelineSeconds,
-                (pixels / timelineWidth) * timelineSeconds,
-            ),
+            Math.min(timelineDuration, pixels / timelinePixelsPerSecond),
         );
 
         return snapToTimelineStep(seconds);
@@ -467,20 +556,6 @@ export default function Editor({
         );
     }
 
-    function getTrackEnd(type: ProjectMedia['type']) {
-        return timelineClips
-            .filter((clip) =>
-                type === 'audio'
-                    ? clip.type === 'audio'
-                    : clip.type !== 'audio',
-            )
-            .reduce(
-                (latestEnd, clip) =>
-                    Math.max(latestEnd, clip.start + clip.duration),
-                0,
-            );
-    }
-
     function rememberMediaDuration(mediaId: number, duration: number) {
         if (!Number.isFinite(duration) || duration <= 0) {
             return;
@@ -492,13 +567,7 @@ export default function Editor({
         }));
     }
 
-    function addMediaToTimeline(item: ProjectMedia) {
-        if (isDeletingMedia) {
-            toggleSelectedMedia(item.id);
-            return;
-        }
-
-        const start = getTrackEnd(item.type);
+    function createTimelineClipsFromMedia(item: ProjectMedia, start: number) {
         const duration =
             mediaDurations[item.id] ?? getTemporaryClipDuration(item.type);
         const nextClip: TimelineClip = {
@@ -529,10 +598,59 @@ export default function Editor({
             });
         }
 
+        return nextClips;
+    }
+
+    function addMediaToTimelineAt(item: ProjectMedia, start: number) {
+        const nextClips = createTimelineClipsFromMedia(item, start);
+        const primaryClip = nextClips[0];
+
         saveTimelineChange([...timelineClips, ...nextClips]);
-        setSelectedClipId(nextClip.id);
+        setSelectedClipId(primaryClip.id);
         setIsPlaying(false);
-        setPlayhead(nextClip.start);
+        setPlayhead(primaryClip.start);
+    }
+
+    function moveTimelineClipTo(clipId: number, start: number) {
+        const movingClip = timelineClips.find((clip) => clip.id === clipId);
+
+        if (!movingClip) {
+            return;
+        }
+
+        const nextStart = snapToTimelineStep(Math.max(0, start));
+        const moveDistance = nextStart - movingClip.start;
+
+        if (moveDistance === 0) {
+            setSelectedClipId(movingClip.id);
+            return;
+        }
+
+        // If a video clip still lines up with its extracted audio, move both together.
+        const linkedClipIds = timelineClips
+            .filter(
+                (clip) =>
+                    clip.mediaId === movingClip.mediaId &&
+                    Math.abs(clip.start - movingClip.start) < 0.001 &&
+                    Math.abs(clip.duration - movingClip.duration) < 0.001,
+            )
+            .map((clip) => clip.id);
+
+        saveTimelineChange(
+            timelineClips.map((clip) =>
+                linkedClipIds.includes(clip.id)
+                    ? {
+                          ...clip,
+                          start: snapToTimelineStep(
+                              Math.max(0, clip.start + moveDistance),
+                          ),
+                      }
+                    : clip,
+            ),
+        );
+        setSelectedClipId(movingClip.id);
+        setIsPlaying(false);
+        setPlayhead(nextStart);
     }
 
     function selectTimelineClip(clip: TimelineClip) {
@@ -547,6 +665,119 @@ export default function Editor({
 
         setIsPlaying(false);
         setPlayhead(nextTime);
+    }
+
+    function getTimelineDropStart(
+        event: React.DragEvent<HTMLDivElement>,
+        offsetPixels = 0,
+    ) {
+        const bounds = event.currentTarget.getBoundingClientRect();
+
+        return pixelsToSeconds(event.clientX - bounds.left - offsetPixels);
+    }
+
+    function canPlaceOnTrack(
+        type: ProjectMedia['type'],
+        track: 'video' | 'audio',
+    ) {
+        if (track === 'audio') {
+            return type === 'audio';
+        }
+
+        return type !== 'audio';
+    }
+
+    function startMediaDrag(
+        event: React.DragEvent<HTMLButtonElement>,
+        item: ProjectMedia,
+    ) {
+        if (isDeletingMedia) {
+            event.preventDefault();
+            return;
+        }
+
+        event.dataTransfer.effectAllowed = 'copy';
+        event.dataTransfer.setData(mediaDragType, String(item.id));
+    }
+
+    function startTimelineClipDrag(
+        event: React.DragEvent<HTMLButtonElement>,
+        clip: TimelineClip,
+    ) {
+        const bounds = event.currentTarget.getBoundingClientRect();
+
+        event.stopPropagation();
+        event.dataTransfer.effectAllowed = 'move';
+        event.dataTransfer.setData(
+            clipDragType,
+            JSON.stringify({
+                clipId: clip.id,
+                offsetPixels: event.clientX - bounds.left,
+            }),
+        );
+    }
+
+    function allowTimelineDrop(event: React.DragEvent<HTMLDivElement>) {
+        if (event.dataTransfer.types.includes(mediaDragType)) {
+            event.preventDefault();
+            event.dataTransfer.dropEffect = 'copy';
+            return;
+        }
+
+        if (event.dataTransfer.types.includes(clipDragType)) {
+            event.preventDefault();
+            event.dataTransfer.dropEffect = 'move';
+        }
+    }
+
+    function dropOnTimeline(
+        event: React.DragEvent<HTMLDivElement>,
+        track: 'video' | 'audio',
+    ) {
+        event.preventDefault();
+
+        const draggedMediaId = Number(
+            event.dataTransfer.getData(mediaDragType),
+        );
+
+        if (draggedMediaId) {
+            const draggedMedia = media.find(
+                (item) => item.id === draggedMediaId,
+            );
+
+            if (!draggedMedia || !canPlaceOnTrack(draggedMedia.type, track)) {
+                return;
+            }
+
+            addMediaToTimelineAt(draggedMedia, getTimelineDropStart(event));
+            return;
+        }
+
+        const draggedClipData = event.dataTransfer.getData(clipDragType);
+
+        if (!draggedClipData) {
+            return;
+        }
+
+        let draggedClipPayload: { clipId: number; offsetPixels: number };
+
+        try {
+            draggedClipPayload = JSON.parse(draggedClipData) as {
+                clipId: number;
+                offsetPixels: number;
+            };
+        } catch {
+            return;
+        }
+
+        const { clipId, offsetPixels } = draggedClipPayload;
+        const draggedClip = timelineClips.find((clip) => clip.id === clipId);
+
+        if (!draggedClip || !canPlaceOnTrack(draggedClip.type, track)) {
+            return;
+        }
+
+        moveTimelineClipTo(clipId, getTimelineDropStart(event, offsetPixels));
     }
 
     function updatePlayheadFromPreviewVideo() {
@@ -715,13 +946,21 @@ export default function Editor({
             return;
         }
 
+        const mediaIdsToDelete = [...selectedMediaIds];
+
         // This sends the selected media IDs to Laravel, where the files and database rows are deleted.
         router.delete(`/projects/${project.id}/media`, {
             data: {
-                media_ids: selectedMediaIds,
+                media_ids: mediaIdsToDelete,
             },
             preserveScroll: true,
             onSuccess: () => {
+                // Keep the temporary editor state in sync after media deletion removes its timeline clips.
+                saveTimelineChange(
+                    timelineClips.filter(
+                        (clip) => !mediaIdsToDelete.includes(clip.mediaId),
+                    ),
+                );
                 setIsDeletingMedia(false);
                 setSelectedMediaIds([]);
             },
@@ -729,7 +968,7 @@ export default function Editor({
     }
 
     function togglePlayback() {
-        // Temporary playback state for the mock editor. Real video playback can be added later.
+        // This controls the shared play/pause state for the preview video, audio track, and timeline playhead.
         setIsPlaying((currentValue) => !currentValue);
     }
 
@@ -924,17 +1163,29 @@ export default function Editor({
 
                                             return (
                                                 <button
-                                                    className={`group relative overflow-hidden rounded-lg border bg-zinc-950 text-left transition hover:border-cyan-500 ${
+                                                    className={`group relative cursor-grab overflow-hidden rounded-lg border bg-zinc-950 text-left transition hover:border-cyan-500 active:cursor-grabbing ${
                                                         selectedMediaIds.includes(
                                                             item.id,
                                                         )
                                                             ? 'border-cyan-500'
                                                             : 'border-zinc-800'
                                                     }`}
+                                                    draggable={!isDeletingMedia}
                                                     key={item.id}
-                                                    onClick={() =>
-                                                        addMediaToTimeline(item)
+                                                    onClick={() => {
+                                                        if (isDeletingMedia) {
+                                                            toggleSelectedMedia(
+                                                                item.id,
+                                                            );
+                                                        }
+                                                    }}
+                                                    onDragStart={(event) =>
+                                                        startMediaDrag(
+                                                            event,
+                                                            item,
+                                                        )
                                                     }
+                                                    title="Drag to the timeline"
                                                     type="button"
                                                 >
                                                     {isDeletingMedia && (
@@ -1453,7 +1704,10 @@ export default function Editor({
                                 </label>
                             </div>
 
-                            <div className="overflow-x-auto">
+                            <div
+                                ref={timelineScrollRef}
+                                className="overflow-x-auto"
+                            >
                                 <div
                                     className="min-w-[1100px]"
                                     style={{ width: timelineWidth }}
@@ -1462,16 +1716,24 @@ export default function Editor({
                                         <div className="border-r border-zinc-800 p-3">
                                             Track
                                         </div>
-                                        <div className="grid grid-cols-8 p-3 font-mono">
-                                            {timelineMarks
-                                                .slice(0, -1)
-                                                .map((mark) => (
-                                                    <span key={mark}>
-                                                        {formatTimelineTime(
+                                        <div className="relative min-h-10 p-3 font-mono">
+                                            {timelineMarks.map((mark) => (
+                                                <span
+                                                    className={`absolute top-3 ${
+                                                        mark === 0
+                                                            ? ''
+                                                            : '-translate-x-1/2'
+                                                    }`}
+                                                    key={mark}
+                                                    style={{
+                                                        left: secondsToPixels(
                                                             mark,
-                                                        )}
-                                                    </span>
-                                                ))}
+                                                        ),
+                                                    }}
+                                                >
+                                                    {formatTimelineTime(mark)}
+                                                </span>
+                                            ))}
                                         </div>
                                     </div>
 
@@ -1481,6 +1743,10 @@ export default function Editor({
                                         </div>
                                         <div
                                             className="relative min-h-24 cursor-crosshair p-3"
+                                            onDragOver={allowTimelineDrop}
+                                            onDrop={(event) =>
+                                                dropOnTimeline(event, 'video')
+                                            }
                                             onClick={movePlayhead}
                                         >
                                             {timelineIntervals.map(
@@ -1515,12 +1781,13 @@ export default function Editor({
                                                 )
                                                 .map((clip) => (
                                                     <button
-                                                        className={`${clip.color} absolute top-3 flex h-14 items-center rounded px-3 text-left text-sm font-medium text-white ${
+                                                        className={`${clip.color} absolute top-3 flex h-14 cursor-grab items-center rounded px-3 text-left text-sm font-medium text-white active:cursor-grabbing ${
                                                             selectedClipId ===
                                                             clip.id
                                                                 ? 'ring-2 ring-cyan-300'
                                                                 : ''
                                                         }`}
+                                                        draggable
                                                         key={clip.id}
                                                         onClick={(event) => {
                                                             event.stopPropagation();
@@ -1528,6 +1795,12 @@ export default function Editor({
                                                                 clip,
                                                             );
                                                         }}
+                                                        onDragStart={(event) =>
+                                                            startTimelineClipDrag(
+                                                                event,
+                                                                clip,
+                                                            )
+                                                        }
                                                         style={{
                                                             left: secondsToPixels(
                                                                 clip.start,
@@ -1547,7 +1820,7 @@ export default function Editor({
                                                 (clip) => clip.type !== 'audio',
                                             ).length === 0 && (
                                                 <div className="flex h-14 items-center justify-center rounded border border-dashed border-zinc-800 text-xs text-zinc-600">
-                                                    Click media to add clips
+                                                    Drag video or images here
                                                 </div>
                                             )}
                                         </div>
@@ -1559,6 +1832,10 @@ export default function Editor({
                                         </div>
                                         <div
                                             className="relative min-h-16 cursor-crosshair p-3"
+                                            onDragOver={allowTimelineDrop}
+                                            onDrop={(event) =>
+                                                dropOnTimeline(event, 'audio')
+                                            }
                                             onClick={movePlayhead}
                                         >
                                             {timelineIntervals.map(
@@ -1593,12 +1870,13 @@ export default function Editor({
                                                 )
                                                 .map((clip) => (
                                                     <button
-                                                        className={`${clip.color} absolute top-3 flex h-9 items-center rounded px-3 text-left text-sm font-medium text-white ${
+                                                        className={`${clip.color} absolute top-3 flex h-9 cursor-grab items-center rounded px-3 text-left text-sm font-medium text-white active:cursor-grabbing ${
                                                             selectedClipId ===
                                                             clip.id
                                                                 ? 'ring-2 ring-cyan-300'
                                                                 : ''
                                                         }`}
+                                                        draggable
                                                         key={clip.id}
                                                         onClick={(event) => {
                                                             event.stopPropagation();
@@ -1606,6 +1884,12 @@ export default function Editor({
                                                                 clip,
                                                             );
                                                         }}
+                                                        onDragStart={(event) =>
+                                                            startTimelineClipDrag(
+                                                                event,
+                                                                clip,
+                                                            )
+                                                        }
                                                         style={{
                                                             left: secondsToPixels(
                                                                 clip.start,
@@ -1625,7 +1909,7 @@ export default function Editor({
                                                 (clip) => clip.type === 'audio',
                                             ).length === 0 && (
                                                 <div className="flex h-9 items-center justify-center rounded border border-dashed border-zinc-800 text-xs text-zinc-600">
-                                                    Click audio to add it here
+                                                    Drag audio here
                                                 </div>
                                             )}
                                         </div>
