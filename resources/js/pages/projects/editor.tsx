@@ -100,6 +100,7 @@ export default function Editor({
 }: EditorProps) {
     const fileInputRef = useRef<HTMLInputElement>(null);
     const previewVideoRef = useRef<HTMLVideoElement>(null);
+    const timelineAudioRef = useRef<HTMLAudioElement>(null);
     const [isPlaying, setIsPlaying] = useState(false);
     const [isUploading, setIsUploading] = useState(false);
     const [uploadError, setUploadError] = useState<string | null>(null);
@@ -182,6 +183,15 @@ export default function Editor({
         );
     }, [playhead, timelineClips]);
 
+    const activeAudioClip = useMemo(() => {
+        return timelineClips.find(
+            (clip) =>
+                clip.type === 'audio' &&
+                playhead >= clip.start &&
+                playhead < clip.start + clip.duration,
+        );
+    }, [playhead, timelineClips]);
+
     const selectedClip = useMemo(() => {
         return timelineClips.find((clip) => clip.id === selectedClipId) ?? null;
     }, [selectedClipId, timelineClips]);
@@ -207,7 +217,7 @@ export default function Editor({
     );
 
     useEffect(() => {
-        if (!isPlaying || activeClip?.type === 'video') {
+        if (!isPlaying || activeClip?.type === 'video' || activeAudioClip) {
             return;
         }
 
@@ -228,7 +238,7 @@ export default function Editor({
         }, timelinePlaybackIntervalMs);
 
         return () => window.clearInterval(timer);
-    }, [activeClip?.type, isPlaying]);
+    }, [activeAudioClip, activeClip?.type, isPlaying]);
 
     useEffect(() => {
         const previewVideo = previewVideoRef.current;
@@ -271,6 +281,76 @@ export default function Editor({
 
         return () => window.clearInterval(timer);
     }, [activeClip, isPlaying]);
+
+    useEffect(() => {
+        const timelineAudio = timelineAudioRef.current;
+
+        if (!timelineAudio || !activeAudioClip) {
+            return;
+        }
+
+        const clipTime = Math.max(
+            0,
+            activeAudioClip.sourceStart + playhead - activeAudioClip.start,
+        );
+
+        if (!isPlaying) {
+            timelineAudio.pause();
+
+            if (Math.abs(timelineAudio.currentTime - clipTime) > 0.08) {
+                timelineAudio.currentTime = clipTime;
+            }
+
+            return;
+        }
+
+        // Audio clips use this hidden player so both uploaded audio and video sound can follow the timeline.
+        if (timelineAudio.paused) {
+            timelineAudio.currentTime = clipTime;
+            void timelineAudio.play().catch(() => {
+                setIsPlaying(false);
+            });
+        }
+    }, [activeAudioClip, isPlaying, playhead]);
+
+    useEffect(() => {
+        if (!isPlaying || !activeAudioClip || activeClip?.type === 'video') {
+            return;
+        }
+
+        const timer = window.setInterval(
+            updatePlayheadFromTimelineAudio,
+            timelinePlaybackIntervalMs,
+        );
+
+        return () => window.clearInterval(timer);
+    }, [activeAudioClip, activeClip?.type, isPlaying]);
+
+    useEffect(() => {
+        function deleteClipWithKeyboard(event: KeyboardEvent) {
+            const target = event.target as HTMLElement | null;
+
+            if (
+                target?.tagName === 'INPUT' ||
+                target?.tagName === 'TEXTAREA' ||
+                target?.isContentEditable
+            ) {
+                return;
+            }
+
+            if (event.key !== 'Backspace') {
+                return;
+            }
+
+            event.preventDefault();
+            deleteSelectedTimelineClip();
+        }
+
+        window.addEventListener('keydown', deleteClipWithKeyboard);
+
+        return () =>
+            window.removeEventListener('keydown', deleteClipWithKeyboard);
+    }, [selectedClipId, timelineClips]);
 
     function getMediaIcon(type: ProjectMedia['type']) {
         if (type === 'image') {
@@ -418,20 +498,38 @@ export default function Editor({
             return;
         }
 
+        const start = getTrackEnd(item.type);
+        const duration =
+            mediaDurations[item.id] ?? getTemporaryClipDuration(item.type);
         const nextClip: TimelineClip = {
             id: Date.now(),
             mediaId: item.id,
             name: item.name,
             type: item.type,
-            start: getTrackEnd(item.type),
-            duration:
-                mediaDurations[item.id] ?? getTemporaryClipDuration(item.type),
+            start,
+            duration,
             sourceStart: 0,
             color: getTimelineColor(item.type),
             url: item.url,
         };
+        const nextClips = [nextClip];
 
-        saveTimelineChange([...timelineClips, nextClip]);
+        if (item.type === 'video') {
+            // For now this creates a timeline audio clip from the uploaded video, so the audio track is visible.
+            nextClips.push({
+                id: Date.now() + 1,
+                mediaId: item.id,
+                name: `${item.name} audio`,
+                type: 'audio',
+                start,
+                duration,
+                sourceStart: 0,
+                color: getTimelineColor('audio'),
+                url: item.url,
+            });
+        }
+
+        saveTimelineChange([...timelineClips, ...nextClips]);
         setSelectedClipId(nextClip.id);
         setIsPlaying(false);
         setPlayhead(nextClip.start);
@@ -475,6 +573,30 @@ export default function Editor({
         setPlayhead(nextTime);
     }
 
+    function updatePlayheadFromTimelineAudio() {
+        const timelineAudio = timelineAudioRef.current;
+
+        if (!timelineAudio || !activeAudioClip) {
+            return;
+        }
+
+        const nextTime = snapToTimelineStep(
+            activeAudioClip.start +
+                timelineAudio.currentTime -
+                activeAudioClip.sourceStart,
+        );
+        const clipEnd = activeAudioClip.start + activeAudioClip.duration;
+
+        if (nextTime >= clipEnd) {
+            timelineAudio.pause();
+            setIsPlaying(false);
+            setPlayhead(snapToTimelineStep(clipEnd));
+            return;
+        }
+
+        setPlayhead(nextTime);
+    }
+
     function cutSelectedClip() {
         const clip = selectedClip;
 
@@ -510,6 +632,19 @@ export default function Editor({
                 .sort((first, second) => first.start - second.start),
         );
         setSelectedClipId(secondPart.id);
+    }
+
+    function deleteSelectedTimelineClip() {
+        if (!selectedClipId) {
+            return;
+        }
+
+        // This removes the selected clip from the timeline only. The uploaded media file stays in the Media Pool.
+        saveTimelineChange(
+            timelineClips.filter((clip) => clip.id !== selectedClipId),
+        );
+        setSelectedClipId(null);
+        setIsPlaying(false);
     }
 
     function openMediaPicker() {
@@ -642,6 +777,16 @@ export default function Editor({
     return (
         <>
             <Head title={`${project.name} editor`} />
+
+            {activeAudioClip && (
+                <audio
+                    key={activeAudioClip.id}
+                    ref={timelineAudioRef}
+                    onEnded={() => setIsPlaying(false)}
+                    preload="metadata"
+                    src={activeAudioClip.url}
+                />
+            )}
 
             <main className="min-h-full bg-zinc-950 text-zinc-100">
                 <div className="flex min-h-[calc(100vh-6.75rem)] flex-col">
@@ -843,7 +988,26 @@ export default function Editor({
                                                                 <track kind="captions" />
                                                             </video>
                                                         ) : (
-                                                            <MediaIcon className="size-6 text-zinc-400 group-hover:text-cyan-400" />
+                                                            <>
+                                                                <MediaIcon className="size-6 text-zinc-400 group-hover:text-cyan-400" />
+                                                                <audio
+                                                                    className="hidden"
+                                                                    onLoadedMetadata={(
+                                                                        event,
+                                                                    ) =>
+                                                                        rememberMediaDuration(
+                                                                            item.id,
+                                                                            event
+                                                                                .currentTarget
+                                                                                .duration,
+                                                                        )
+                                                                    }
+                                                                    preload="metadata"
+                                                                    src={
+                                                                        item.url
+                                                                    }
+                                                                />
+                                                            </>
                                                         )}
                                                     </span>
                                                     <span className="block min-w-0 p-2">
@@ -1256,6 +1420,17 @@ export default function Editor({
                                     >
                                         <Scissors className="size-4" />
                                         Cut
+                                    </Button>
+                                    <Button
+                                        variant="outline"
+                                        className="border-zinc-700 bg-zinc-950 text-zinc-200 hover:bg-zinc-800"
+                                        disabled={!selectedClipId}
+                                        onClick={deleteSelectedTimelineClip}
+                                        title="Delete selected timeline clip"
+                                        type="button"
+                                    >
+                                        <Trash2 className="size-4" />
+                                        Delete
                                     </Button>
                                 </div>
 
