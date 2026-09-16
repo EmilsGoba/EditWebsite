@@ -6,8 +6,10 @@ import {
     Film,
     Image,
     MousePointer2,
+    Minus,
     Pause,
     Play,
+    Plus,
     RotateCcw,
     Redo2,
     Save,
@@ -53,11 +55,49 @@ type TimelineClip = {
     start: number;
     duration: number;
     sourceStart: number;
+    scale: number;
+    positionX: number;
+    positionY: number;
+    rotation: number;
     color: string;
     url: string;
 };
 
-type SavedTimelineClip = Omit<TimelineClip, 'color'>;
+type SavedTimelineClip = Omit<
+    TimelineClip,
+    'color' | 'positionX' | 'positionY' | 'rotation' | 'scale'
+> &
+    Partial<
+        Pick<TimelineClip, 'positionX' | 'positionY' | 'rotation' | 'scale'>
+    >;
+
+type ClipTrimState = {
+    clipId: number;
+    edge: 'left' | 'right';
+    linkedClipIds: number[];
+    startingClips: TimelineClip[];
+    trackLeft: number;
+};
+
+type PlayheadDragState = {
+    trackLeft: number;
+};
+
+type TimelineDropPreview = {
+    track: 'video' | 'audio';
+    name: string;
+    type: ProjectMedia['type'];
+    start: number;
+    duration: number;
+};
+
+type TimelineClipMovePreview = {
+    clipId: number;
+    linkedClipIds: number[];
+    originalStart: number;
+    previewStart: number;
+    offsetPixels: number;
+};
 
 const effectItems = ['Fade in', 'Blur', 'Color boost', 'Black and white'];
 const uploadLimits =
@@ -66,12 +106,18 @@ const timelineBaseWidth = 1100;
 const defaultTimelineSeconds = 70;
 const timelinePaddingSeconds = 10;
 const timelineMajorIntervalSeconds = 10;
-const timelineStepSeconds = 0.01;
-const timelinePlaybackStepSeconds = 0.02;
-const timelinePlaybackIntervalMs = 20;
+const timelineFramesPerSecond = 60;
+const timelineFrameDurationSeconds = 1 / timelineFramesPerSecond;
+const timelinePlaybackIntervalMs = 1000 / timelineFramesPerSecond;
 const visibleTimelineIntervalSeconds = 0.1;
 const mediaDragType = 'application/x-video-editor-media';
 const clipDragType = 'application/x-video-editor-clip';
+const defaultClipProperties = {
+    scale: 100,
+    positionX: 0,
+    positionY: 0,
+    rotation: 0,
+};
 
 function getTemporaryClipDuration(type: ProjectMedia['type']) {
     if (type === 'image') {
@@ -106,6 +152,7 @@ export default function Editor({
     const previewVideoRef = useRef<HTMLVideoElement>(null);
     const timelineAudioRef = useRef<HTMLAudioElement>(null);
     const timelineScrollRef = useRef<HTMLDivElement>(null);
+    const latestTrimClipsRef = useRef<TimelineClip[] | null>(null);
     const [isPlaying, setIsPlaying] = useState(false);
     const [isUploading, setIsUploading] = useState(false);
     const [uploadError, setUploadError] = useState<string | null>(null);
@@ -117,7 +164,11 @@ export default function Editor({
     const initialTimelineClips = useMemo(
         () =>
             savedTimelineClips.map((clip) => ({
+                ...defaultClipProperties,
                 ...clip,
+                start: snapToTimelineStep(clip.start),
+                duration: snapToTimelineStep(clip.duration),
+                sourceStart: snapToTimelineStep(clip.sourceStart),
                 color: getTimelineColor(clip.type),
             })),
         [savedTimelineClips],
@@ -135,12 +186,20 @@ export default function Editor({
     const [selectedTool, setSelectedTool] = useState<'select' | 'cut'>(
         'select',
     );
-    const [scale, setScale] = useState(100);
-    const [positionX, setPositionX] = useState(0);
-    const [positionY, setPositionY] = useState(0);
-    const [rotation, setRotation] = useState(0);
     const [timelineZoom, setTimelineZoom] = useState(50);
     const [timelineViewportWidth, setTimelineViewportWidth] = useState(0);
+    const [clipTrimState, setClipTrimState] = useState<ClipTrimState | null>(
+        null,
+    );
+    const [playheadDragState, setPlayheadDragState] =
+        useState<PlayheadDragState | null>(null);
+    const [draggingMedia, setDraggingMedia] = useState<ProjectMedia | null>(
+        null,
+    );
+    const [timelineDropPreview, setTimelineDropPreview] =
+        useState<TimelineDropPreview | null>(null);
+    const [timelineClipMovePreview, setTimelineClipMovePreview] =
+        useState<TimelineClipMovePreview | null>(null);
 
     const previewLabel = useMemo(() => {
         if (project.format === '9:16') {
@@ -228,6 +287,16 @@ export default function Editor({
     const selectedClip = useMemo(() => {
         return timelineClips.find((clip) => clip.id === selectedClipId) ?? null;
     }, [selectedClipId, timelineClips]);
+    const selectedVisualClip =
+        selectedClip && selectedClip.type !== 'audio' ? selectedClip : null;
+    const selectedClipScale =
+        selectedVisualClip?.scale ?? defaultClipProperties.scale;
+    const selectedClipPositionX =
+        selectedVisualClip?.positionX ?? defaultClipProperties.positionX;
+    const selectedClipPositionY =
+        selectedVisualClip?.positionY ?? defaultClipProperties.positionY;
+    const selectedClipRotation =
+        selectedVisualClip?.rotation ?? defaultClipProperties.rotation;
 
     const timelineMarks = useMemo(
         () =>
@@ -273,7 +342,7 @@ export default function Editor({
                 return snapToTimelineStep(
                     Math.min(
                         timelineDuration,
-                        currentTime + timelinePlaybackStepSeconds,
+                        currentTime + timelineFrameDurationSeconds,
                     ),
                 );
             });
@@ -444,6 +513,69 @@ export default function Editor({
             window.removeEventListener('keydown', handleTimelineKeyboard);
     }, [selectedClipId, timelineClips]);
 
+    useEffect(() => {
+        if (!clipTrimState) {
+            return;
+        }
+
+        const currentTrimState = clipTrimState;
+
+        function handleClipTrim(event: MouseEvent) {
+            const nextClips = trimTimelineClips(
+                currentTrimState,
+                event.clientX,
+            );
+
+            latestTrimClipsRef.current = nextClips;
+            setTimelineClips(nextClips);
+            setSaveStatus('unsaved');
+        }
+
+        function finishClipTrim() {
+            if (latestTrimClipsRef.current) {
+                saveTimelineChange(latestTrimClipsRef.current);
+            }
+
+            latestTrimClipsRef.current = null;
+            setClipTrimState(null);
+        }
+
+        window.addEventListener('mousemove', handleClipTrim);
+        window.addEventListener('mouseup', finishClipTrim);
+
+        return () => {
+            window.removeEventListener('mousemove', handleClipTrim);
+            window.removeEventListener('mouseup', finishClipTrim);
+        };
+    }, [clipTrimState, history, historyIndex]);
+
+    useEffect(() => {
+        if (!playheadDragState) {
+            return;
+        }
+
+        const currentDragState = playheadDragState;
+
+        function dragPlayhead(event: MouseEvent) {
+            setIsPlaying(false);
+            setPlayhead(
+                getSnappedPlayheadTime(currentDragState, event.clientX),
+            );
+        }
+
+        function stopDraggingPlayhead() {
+            setPlayheadDragState(null);
+        }
+
+        window.addEventListener('mousemove', dragPlayhead);
+        window.addEventListener('mouseup', stopDraggingPlayhead);
+
+        return () => {
+            window.removeEventListener('mousemove', dragPlayhead);
+            window.removeEventListener('mouseup', stopDraggingPlayhead);
+        };
+    }, [playheadDragState]);
+
     function getMediaIcon(type: ProjectMedia['type']) {
         if (type === 'image') {
             return Image;
@@ -482,17 +614,22 @@ export default function Editor({
     }
 
     function formatTimelineTime(seconds: number) {
-        const minutes = Math.floor(seconds / 60)
+        const totalFrames = Math.max(
+            0,
+            Math.round(seconds * timelineFramesPerSecond),
+        );
+        const wholeSeconds = Math.floor(totalFrames / timelineFramesPerSecond);
+        const frame = (totalFrames % timelineFramesPerSecond)
             .toString()
             .padStart(2, '0');
-        const remainingSeconds = Math.floor(seconds % 60)
+        const minutes = Math.floor(wholeSeconds / 60)
             .toString()
             .padStart(2, '0');
-        const milliseconds = Math.round((seconds % 1) * 1000)
+        const remainingSeconds = Math.floor(wholeSeconds % 60)
             .toString()
-            .padStart(3, '0');
+            .padStart(2, '0');
 
-        return `${minutes}:${remainingSeconds}.${milliseconds}`;
+        return `${minutes}:${remainingSeconds}:${frame}`;
     }
 
     function formatShortDuration(seconds: number) {
@@ -504,12 +641,14 @@ export default function Editor({
     }
 
     function snapToTimelineStep(seconds: number) {
-        // The timeline uses 10 millisecond precision, so cuts land on clean 0.01s points.
-        return Math.round(seconds / timelineStepSeconds) * timelineStepSeconds;
+        // The editor timeline snaps to 60 FPS, so clips and the playhead always land on real frame boundaries.
+        const frame = Math.round(seconds * timelineFramesPerSecond);
+
+        return Number((frame / timelineFramesPerSecond).toFixed(6));
     }
 
     function secondsToPixels(seconds: number) {
-        return seconds * timelinePixelsPerSecond;
+        return snapToTimelineStep(seconds) * timelinePixelsPerSecond;
     }
 
     function pixelsToSeconds(pixels: number) {
@@ -523,12 +662,18 @@ export default function Editor({
 
     function saveTimelineChange(nextClips: TimelineClip[]) {
         // Every timeline edit is stored in a small local history, which powers undo and redo.
+        const snappedClips = nextClips.map((clip) => ({
+            ...clip,
+            start: snapToTimelineStep(clip.start),
+            duration: snapToTimelineStep(clip.duration),
+            sourceStart: snapToTimelineStep(clip.sourceStart),
+        }));
         const nextHistory = history.slice(0, historyIndex + 1);
 
-        nextHistory.push(nextClips);
+        nextHistory.push(snappedClips);
         setHistory(nextHistory);
         setHistoryIndex(nextHistory.length - 1);
-        setTimelineClips(nextClips);
+        setTimelineClips(snappedClips);
         setSaveStatus('unsaved');
     }
 
@@ -546,6 +691,10 @@ export default function Editor({
                     start: clip.start,
                     duration: clip.duration,
                     sourceStart: clip.sourceStart,
+                    scale: clip.scale,
+                    positionX: clip.positionX,
+                    positionY: clip.positionY,
+                    rotation: clip.rotation,
                 })),
             },
             {
@@ -568,8 +717,7 @@ export default function Editor({
     }
 
     function createTimelineClipsFromMedia(item: ProjectMedia, start: number) {
-        const duration =
-            mediaDurations[item.id] ?? getTemporaryClipDuration(item.type);
+        const duration = getMediaTimelineDuration(item);
         const nextClip: TimelineClip = {
             id: Date.now(),
             mediaId: item.id,
@@ -578,6 +726,7 @@ export default function Editor({
             start,
             duration,
             sourceStart: 0,
+            ...defaultClipProperties,
             color: getTimelineColor(item.type),
             url: item.url,
         };
@@ -593,12 +742,17 @@ export default function Editor({
                 start,
                 duration,
                 sourceStart: 0,
+                ...defaultClipProperties,
                 color: getTimelineColor('audio'),
                 url: item.url,
             });
         }
 
         return nextClips;
+    }
+
+    function getMediaTimelineDuration(item: ProjectMedia) {
+        return mediaDurations[item.id] ?? getTemporaryClipDuration(item.type);
     }
 
     function addMediaToTimelineAt(item: ProjectMedia, start: number) {
@@ -608,7 +762,6 @@ export default function Editor({
         saveTimelineChange([...timelineClips, ...nextClips]);
         setSelectedClipId(primaryClip.id);
         setIsPlaying(false);
-        setPlayhead(primaryClip.start);
     }
 
     function moveTimelineClipTo(clipId: number, start: number) {
@@ -650,21 +803,159 @@ export default function Editor({
         );
         setSelectedClipId(movingClip.id);
         setIsPlaying(false);
-        setPlayhead(nextStart);
+    }
+
+    function getOriginalClipDuration(clip: TimelineClip) {
+        // Metadata gives the true source duration after the browser has loaded it. Existing saved clips use their current source span as a safe fallback.
+        return Math.max(
+            mediaDurations[clip.mediaId] ?? getTemporaryClipDuration(clip.type),
+            clip.sourceStart + clip.duration,
+        );
+    }
+
+    function getLinkedClipIds(clipToMatch: TimelineClip) {
+        return timelineClips
+            .filter(
+                (clip) =>
+                    clip.mediaId === clipToMatch.mediaId &&
+                    Math.abs(clip.start - clipToMatch.start) < 0.001 &&
+                    Math.abs(clip.duration - clipToMatch.duration) < 0.001 &&
+                    Math.abs(clip.sourceStart - clipToMatch.sourceStart) <
+                        0.001,
+            )
+            .map((clip) => clip.id);
+    }
+
+    function getTimelineClipPreviewStart(clip: TimelineClip) {
+        if (!timelineClipMovePreview?.linkedClipIds.includes(clip.id)) {
+            return clip.start;
+        }
+
+        const moveDistance =
+            timelineClipMovePreview.previewStart -
+            timelineClipMovePreview.originalStart;
+
+        return snapToTimelineStep(Math.max(0, clip.start + moveDistance));
+    }
+
+    function getTimelineDragMarkerStart() {
+        return (
+            timelineDropPreview?.start ??
+            timelineClipMovePreview?.previewStart ??
+            null
+        );
+    }
+
+    function startClipTrim(
+        event: React.MouseEvent<HTMLSpanElement>,
+        clip: TimelineClip,
+        edge: ClipTrimState['edge'],
+    ) {
+        const track = event.currentTarget.closest('[data-timeline-track]');
+
+        if (!(track instanceof HTMLDivElement)) {
+            return;
+        }
+
+        event.preventDefault();
+        event.stopPropagation();
+        setSelectedClipId(clip.id);
+        setIsPlaying(false);
+        latestTrimClipsRef.current = null;
+        setClipTrimState({
+            clipId: clip.id,
+            edge,
+            linkedClipIds: getLinkedClipIds(clip),
+            startingClips: timelineClips,
+            trackLeft: track.getBoundingClientRect().left,
+        });
+    }
+
+    function trimTimelineClips(
+        trimState: ClipTrimState,
+        pointerClientX: number,
+    ) {
+        const baseClip = trimState.startingClips.find(
+            (clip) => clip.id === trimState.clipId,
+        );
+
+        if (!baseClip) {
+            return trimState.startingClips;
+        }
+
+        const pointerTime = pixelsToSeconds(
+            pointerClientX - trimState.trackLeft,
+        );
+        const minimumDuration = timelineFrameDurationSeconds;
+        const originalDuration = getOriginalClipDuration(baseClip);
+        let nextStart = baseClip.start;
+        let nextDuration = baseClip.duration;
+        let nextSourceStart = baseClip.sourceStart;
+
+        if (trimState.edge === 'right') {
+            const maxEnd =
+                baseClip.start + originalDuration - baseClip.sourceStart;
+            const nextEnd = snapToTimelineStep(
+                Math.min(
+                    Math.max(pointerTime, baseClip.start + minimumDuration),
+                    maxEnd,
+                ),
+            );
+
+            nextDuration = snapToTimelineStep(nextEnd - baseClip.start);
+        } else {
+            const clipEnd = baseClip.start + baseClip.duration;
+            const earliestStart = Math.max(
+                0,
+                baseClip.start - baseClip.sourceStart,
+                clipEnd - originalDuration,
+            );
+            nextStart = snapToTimelineStep(
+                Math.min(
+                    Math.max(pointerTime, earliestStart),
+                    clipEnd - minimumDuration,
+                ),
+            );
+            nextDuration = snapToTimelineStep(clipEnd - nextStart);
+            nextSourceStart = snapToTimelineStep(
+                baseClip.sourceStart + nextStart - baseClip.start,
+            );
+        }
+
+        return trimState.startingClips.map((clip) =>
+            trimState.linkedClipIds.includes(clip.id)
+                ? {
+                      ...clip,
+                      start: nextStart,
+                      duration: nextDuration,
+                      sourceStart: nextSourceStart,
+                  }
+                : clip,
+        );
     }
 
     function selectTimelineClip(clip: TimelineClip) {
         setSelectedClipId(clip.id);
         setIsPlaying(false);
-        setPlayhead(clip.start);
     }
 
-    function movePlayhead(event: React.MouseEvent<HTMLDivElement>) {
-        const bounds = event.currentTarget.getBoundingClientRect();
-        const nextTime = pixelsToSeconds(event.clientX - bounds.left);
+    function getSnappedPlayheadTime(
+        dragState: PlayheadDragState,
+        pointerClientX: number,
+    ) {
+        return pixelsToSeconds(pointerClientX - dragState.trackLeft);
+    }
 
+    function startPlayheadDrag(event: React.MouseEvent<HTMLDivElement>) {
+        const bounds = event.currentTarget.getBoundingClientRect();
+        const nextDragState = {
+            trackLeft: bounds.left,
+        };
+
+        event.preventDefault();
         setIsPlaying(false);
-        setPlayhead(nextTime);
+        setPlayhead(getSnappedPlayheadTime(nextDragState, event.clientX));
+        setPlayheadDragState(nextDragState);
     }
 
     function getTimelineDropStart(
@@ -698,13 +989,44 @@ export default function Editor({
 
         event.dataTransfer.effectAllowed = 'copy';
         event.dataTransfer.setData(mediaDragType, String(item.id));
+        setDraggingMedia(item);
+        setTimelineDropPreview(null);
+
+        hideBrowserDragImage(event);
+    }
+
+    function hideBrowserDragImage(event: React.DragEvent<HTMLElement>) {
+        // The editor draws its own snapped timeline preview, so the browser drag ghost would only add visual noise.
+        const dragImage = document.createElement('div');
+        dragImage.style.height = '1px';
+        dragImage.style.opacity = '0';
+        dragImage.style.position = 'absolute';
+        dragImage.style.width = '1px';
+        document.body.appendChild(dragImage);
+        event.dataTransfer.setDragImage(dragImage, 0, 0);
+        window.setTimeout(() => dragImage.remove(), 0);
+    }
+
+    function stopMediaDrag() {
+        setDraggingMedia(null);
+        setTimelineDropPreview(null);
+    }
+
+    function stopTimelineClipDrag() {
+        setTimelineClipMovePreview(null);
     }
 
     function startTimelineClipDrag(
         event: React.DragEvent<HTMLButtonElement>,
         clip: TimelineClip,
     ) {
+        if ((event.target as HTMLElement).closest('[data-resize-handle]')) {
+            event.preventDefault();
+            return;
+        }
+
         const bounds = event.currentTarget.getBoundingClientRect();
+        const offsetPixels = event.clientX - bounds.left;
 
         event.stopPropagation();
         event.dataTransfer.effectAllowed = 'move';
@@ -712,22 +1034,76 @@ export default function Editor({
             clipDragType,
             JSON.stringify({
                 clipId: clip.id,
-                offsetPixels: event.clientX - bounds.left,
+                offsetPixels,
             }),
         );
+        setSelectedClipId(clip.id);
+        setTimelineDropPreview(null);
+        setTimelineClipMovePreview({
+            clipId: clip.id,
+            linkedClipIds: getLinkedClipIds(clip),
+            originalStart: clip.start,
+            previewStart: clip.start,
+            offsetPixels,
+        });
+        hideBrowserDragImage(event);
     }
 
-    function allowTimelineDrop(event: React.DragEvent<HTMLDivElement>) {
+    function allowTimelineDrop(
+        event: React.DragEvent<HTMLDivElement>,
+        track: 'video' | 'audio',
+    ) {
         if (event.dataTransfer.types.includes(mediaDragType)) {
+            if (!draggingMedia || !canPlaceOnTrack(draggingMedia.type, track)) {
+                setTimelineDropPreview(null);
+                return;
+            }
+
             event.preventDefault();
             event.dataTransfer.dropEffect = 'copy';
+            setTimelineDropPreview({
+                track,
+                name: draggingMedia.name,
+                type: draggingMedia.type,
+                start: getTimelineDropStart(event),
+                duration: getMediaTimelineDuration(draggingMedia),
+            });
             return;
         }
 
         if (event.dataTransfer.types.includes(clipDragType)) {
+            if (timelineClipMovePreview) {
+                const draggedClip = timelineClips.find(
+                    (clip) => clip.id === timelineClipMovePreview.clipId,
+                );
+
+                if (!draggedClip || !canPlaceOnTrack(draggedClip.type, track)) {
+                    return;
+                }
+
+                setTimelineClipMovePreview({
+                    ...timelineClipMovePreview,
+                    previewStart: getTimelineDropStart(
+                        event,
+                        timelineClipMovePreview.offsetPixels,
+                    ),
+                });
+            }
+
             event.preventDefault();
             event.dataTransfer.dropEffect = 'move';
         }
+    }
+
+    function leaveTimelineDrop(event: React.DragEvent<HTMLDivElement>) {
+        if (
+            event.relatedTarget instanceof Node &&
+            event.currentTarget.contains(event.relatedTarget)
+        ) {
+            return;
+        }
+
+        setTimelineDropPreview(null);
     }
 
     function dropOnTimeline(
@@ -746,16 +1122,19 @@ export default function Editor({
             );
 
             if (!draggedMedia || !canPlaceOnTrack(draggedMedia.type, track)) {
+                stopMediaDrag();
                 return;
             }
 
             addMediaToTimelineAt(draggedMedia, getTimelineDropStart(event));
+            stopMediaDrag();
             return;
         }
 
         const draggedClipData = event.dataTransfer.getData(clipDragType);
 
         if (!draggedClipData) {
+            stopTimelineClipDrag();
             return;
         }
 
@@ -767,6 +1146,7 @@ export default function Editor({
                 offsetPixels: number;
             };
         } catch {
+            stopTimelineClipDrag();
             return;
         }
 
@@ -774,10 +1154,12 @@ export default function Editor({
         const draggedClip = timelineClips.find((clip) => clip.id === clipId);
 
         if (!draggedClip || !canPlaceOnTrack(draggedClip.type, track)) {
+            stopTimelineClipDrag();
             return;
         }
 
         moveTimelineClipTo(clipId, getTimelineDropStart(event, offsetPixels));
+        stopTimelineClipDrag();
     }
 
     function updatePlayheadFromPreviewVideo() {
@@ -876,6 +1258,27 @@ export default function Editor({
         );
         setSelectedClipId(null);
         setIsPlaying(false);
+    }
+
+    function updateSelectedClipProperty(
+        property: keyof typeof defaultClipProperties,
+        value: number,
+    ) {
+        if (!selectedVisualClip) {
+            return;
+        }
+
+        // Resize controls belong to the selected timeline clip, so each clip can keep different settings.
+        saveTimelineChange(
+            timelineClips.map((clip) =>
+                clip.id === selectedVisualClip.id
+                    ? {
+                          ...clip,
+                          [property]: value,
+                      }
+                    : clip,
+            ),
+        );
     }
 
     function openMediaPicker() {
@@ -1006,11 +1409,27 @@ export default function Editor({
     }
 
     function resetResizeControls() {
-        // This returns the preview content back to its starting size and position.
-        setScale(100);
-        setPositionX(0);
-        setPositionY(0);
-        setRotation(0);
+        if (!selectedVisualClip) {
+            return;
+        }
+
+        // Reset only the selected clip, leaving the other timeline clips unchanged.
+        saveTimelineChange(
+            timelineClips.map((clip) =>
+                clip.id === selectedVisualClip.id
+                    ? {
+                          ...clip,
+                          ...defaultClipProperties,
+                      }
+                    : clip,
+            ),
+        );
+    }
+
+    function changeTimelineZoom(amount: number) {
+        setTimelineZoom((currentZoom) =>
+            Math.min(1000, Math.max(0, currentZoom + amount)),
+        );
     }
 
     return (
@@ -1185,6 +1604,7 @@ export default function Editor({
                                                             item,
                                                         )
                                                     }
+                                                    onDragEnd={stopMediaDrag}
                                                     title="Drag to the timeline"
                                                     type="button"
                                                 >
@@ -1348,7 +1768,9 @@ export default function Editor({
                                     <div
                                         className="absolute inset-0 flex items-center justify-center text-center transition"
                                         style={{
-                                            transform: `translate(${positionX}px, ${positionY}px) rotate(${rotation}deg) scale(${scale / 100})`,
+                                            transform: activeClip
+                                                ? `translate(${activeClip.positionX}px, ${activeClip.positionY}px) rotate(${activeClip.rotation}deg) scale(${activeClip.scale / 100})`
+                                                : undefined,
                                         }}
                                     >
                                         {activeClip?.type === 'image' ? (
@@ -1403,11 +1825,14 @@ export default function Editor({
                                         Resize
                                     </h2>
                                     <p className="mt-1 text-xs text-zinc-500">
-                                        Temporary video controls
+                                        {selectedVisualClip
+                                            ? selectedVisualClip.name
+                                            : 'Select a video or image clip'}
                                     </p>
                                 </div>
                                 <Button
-                                    className="h-8 gap-2 border-zinc-700 bg-zinc-950 px-3 text-xs text-zinc-200 hover:bg-zinc-800"
+                                    className="h-8 gap-2 border-zinc-700 bg-zinc-950 px-3 text-xs text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+                                    disabled={!selectedVisualClip}
                                     onClick={resetResizeControls}
                                     type="button"
                                     variant="outline"
@@ -1423,25 +1848,33 @@ export default function Editor({
                                         Scale
                                         <span className="flex items-center gap-1">
                                             <input
-                                                className="h-8 w-20 rounded border border-zinc-700 bg-zinc-950 px-2 font-mono text-xs text-zinc-100 outline-none focus:border-cyan-500"
+                                                className="h-8 w-20 rounded border border-zinc-700 bg-zinc-950 px-2 font-mono text-xs text-zinc-100 outline-none focus:border-cyan-500 disabled:opacity-50"
+                                                disabled={!selectedVisualClip}
                                                 max="160"
                                                 min="40"
                                                 onChange={(event) =>
-                                                    setScale(
+                                                    updateSelectedClipProperty(
+                                                        'scale',
                                                         Number(
                                                             event.target.value,
                                                         ),
                                                     )
                                                 }
                                                 type="number"
-                                                value={scale}
+                                                value={selectedClipScale}
                                             />
                                             <span className="text-zinc-500">
                                                 %
                                             </span>
                                             <button
-                                                className="ml-1 flex size-8 items-center justify-center rounded border border-zinc-700 bg-zinc-950 text-zinc-400 transition hover:border-cyan-500 hover:text-white"
-                                                onClick={() => setScale(100)}
+                                                className="ml-1 flex size-8 items-center justify-center rounded border border-zinc-700 bg-zinc-950 text-zinc-400 transition hover:border-cyan-500 hover:text-white disabled:opacity-50"
+                                                disabled={!selectedVisualClip}
+                                                onClick={() =>
+                                                    updateSelectedClipProperty(
+                                                        'scale',
+                                                        100,
+                                                    )
+                                                }
                                                 title="Reset scale"
                                                 type="button"
                                             >
@@ -1450,14 +1883,18 @@ export default function Editor({
                                         </span>
                                     </span>
                                     <input
-                                        className="mt-2 w-full accent-cyan-500"
+                                        className="mt-2 w-full accent-cyan-500 disabled:opacity-50"
+                                        disabled={!selectedVisualClip}
                                         max="160"
                                         min="40"
                                         onChange={(event) =>
-                                            setScale(Number(event.target.value))
+                                            updateSelectedClipProperty(
+                                                'scale',
+                                                Number(event.target.value),
+                                            )
                                         }
                                         type="range"
-                                        value={scale}
+                                        value={selectedClipScale}
                                     />
                                 </label>
 
@@ -1466,25 +1903,33 @@ export default function Editor({
                                         Position X
                                         <span className="flex items-center gap-1">
                                             <input
-                                                className="h-8 w-20 rounded border border-zinc-700 bg-zinc-950 px-2 font-mono text-xs text-zinc-100 outline-none focus:border-cyan-500"
+                                                className="h-8 w-20 rounded border border-zinc-700 bg-zinc-950 px-2 font-mono text-xs text-zinc-100 outline-none focus:border-cyan-500 disabled:opacity-50"
+                                                disabled={!selectedVisualClip}
                                                 max="100"
                                                 min="-100"
                                                 onChange={(event) =>
-                                                    setPositionX(
+                                                    updateSelectedClipProperty(
+                                                        'positionX',
                                                         Number(
                                                             event.target.value,
                                                         ),
                                                     )
                                                 }
                                                 type="number"
-                                                value={positionX}
+                                                value={selectedClipPositionX}
                                             />
                                             <span className="text-zinc-500">
                                                 px
                                             </span>
                                             <button
-                                                className="ml-1 flex size-8 items-center justify-center rounded border border-zinc-700 bg-zinc-950 text-zinc-400 transition hover:border-cyan-500 hover:text-white"
-                                                onClick={() => setPositionX(0)}
+                                                className="ml-1 flex size-8 items-center justify-center rounded border border-zinc-700 bg-zinc-950 text-zinc-400 transition hover:border-cyan-500 hover:text-white disabled:opacity-50"
+                                                disabled={!selectedVisualClip}
+                                                onClick={() =>
+                                                    updateSelectedClipProperty(
+                                                        'positionX',
+                                                        0,
+                                                    )
+                                                }
                                                 title="Reset position X"
                                                 type="button"
                                             >
@@ -1493,16 +1938,18 @@ export default function Editor({
                                         </span>
                                     </span>
                                     <input
-                                        className="mt-2 w-full accent-cyan-500"
+                                        className="mt-2 w-full accent-cyan-500 disabled:opacity-50"
+                                        disabled={!selectedVisualClip}
                                         max="100"
                                         min="-100"
                                         onChange={(event) =>
-                                            setPositionX(
+                                            updateSelectedClipProperty(
+                                                'positionX',
                                                 Number(event.target.value),
                                             )
                                         }
                                         type="range"
-                                        value={positionX}
+                                        value={selectedClipPositionX}
                                     />
                                 </label>
 
@@ -1511,25 +1958,33 @@ export default function Editor({
                                         Position Y
                                         <span className="flex items-center gap-1">
                                             <input
-                                                className="h-8 w-20 rounded border border-zinc-700 bg-zinc-950 px-2 font-mono text-xs text-zinc-100 outline-none focus:border-cyan-500"
+                                                className="h-8 w-20 rounded border border-zinc-700 bg-zinc-950 px-2 font-mono text-xs text-zinc-100 outline-none focus:border-cyan-500 disabled:opacity-50"
+                                                disabled={!selectedVisualClip}
                                                 max="100"
                                                 min="-100"
                                                 onChange={(event) =>
-                                                    setPositionY(
+                                                    updateSelectedClipProperty(
+                                                        'positionY',
                                                         Number(
                                                             event.target.value,
                                                         ),
                                                     )
                                                 }
                                                 type="number"
-                                                value={positionY}
+                                                value={selectedClipPositionY}
                                             />
                                             <span className="text-zinc-500">
                                                 px
                                             </span>
                                             <button
-                                                className="ml-1 flex size-8 items-center justify-center rounded border border-zinc-700 bg-zinc-950 text-zinc-400 transition hover:border-cyan-500 hover:text-white"
-                                                onClick={() => setPositionY(0)}
+                                                className="ml-1 flex size-8 items-center justify-center rounded border border-zinc-700 bg-zinc-950 text-zinc-400 transition hover:border-cyan-500 hover:text-white disabled:opacity-50"
+                                                disabled={!selectedVisualClip}
+                                                onClick={() =>
+                                                    updateSelectedClipProperty(
+                                                        'positionY',
+                                                        0,
+                                                    )
+                                                }
                                                 title="Reset position Y"
                                                 type="button"
                                             >
@@ -1538,16 +1993,18 @@ export default function Editor({
                                         </span>
                                     </span>
                                     <input
-                                        className="mt-2 w-full accent-cyan-500"
+                                        className="mt-2 w-full accent-cyan-500 disabled:opacity-50"
+                                        disabled={!selectedVisualClip}
                                         max="100"
                                         min="-100"
                                         onChange={(event) =>
-                                            setPositionY(
+                                            updateSelectedClipProperty(
+                                                'positionY',
                                                 Number(event.target.value),
                                             )
                                         }
                                         type="range"
-                                        value={positionY}
+                                        value={selectedClipPositionY}
                                     />
                                 </label>
 
@@ -1556,25 +2013,33 @@ export default function Editor({
                                         Rotation
                                         <span className="flex items-center gap-1">
                                             <input
-                                                className="h-8 w-20 rounded border border-zinc-700 bg-zinc-950 px-2 font-mono text-xs text-zinc-100 outline-none focus:border-cyan-500"
+                                                className="h-8 w-20 rounded border border-zinc-700 bg-zinc-950 px-2 font-mono text-xs text-zinc-100 outline-none focus:border-cyan-500 disabled:opacity-50"
+                                                disabled={!selectedVisualClip}
                                                 max="180"
                                                 min="-180"
                                                 onChange={(event) =>
-                                                    setRotation(
+                                                    updateSelectedClipProperty(
+                                                        'rotation',
                                                         Number(
                                                             event.target.value,
                                                         ),
                                                     )
                                                 }
                                                 type="number"
-                                                value={rotation}
+                                                value={selectedClipRotation}
                                             />
                                             <span className="text-zinc-500">
                                                 deg
                                             </span>
                                             <button
-                                                className="ml-1 flex size-8 items-center justify-center rounded border border-zinc-700 bg-zinc-950 text-zinc-400 transition hover:border-cyan-500 hover:text-white"
-                                                onClick={() => setRotation(0)}
+                                                className="ml-1 flex size-8 items-center justify-center rounded border border-zinc-700 bg-zinc-950 text-zinc-400 transition hover:border-cyan-500 hover:text-white disabled:opacity-50"
+                                                disabled={!selectedVisualClip}
+                                                onClick={() =>
+                                                    updateSelectedClipProperty(
+                                                        'rotation',
+                                                        0,
+                                                    )
+                                                }
                                                 title="Reset rotation"
                                                 type="button"
                                             >
@@ -1583,16 +2048,18 @@ export default function Editor({
                                         </span>
                                     </span>
                                     <input
-                                        className="mt-2 w-full accent-cyan-500"
+                                        className="mt-2 w-full accent-cyan-500 disabled:opacity-50"
+                                        disabled={!selectedVisualClip}
                                         max="180"
                                         min="-180"
                                         onChange={(event) =>
-                                            setRotation(
+                                            updateSelectedClipProperty(
+                                                'rotation',
                                                 Number(event.target.value),
                                             )
                                         }
                                         type="range"
-                                        value={rotation}
+                                        value={selectedClipRotation}
                                     />
                                 </label>
                             </div>
@@ -1685,22 +2152,47 @@ export default function Editor({
                                     </Button>
                                 </div>
 
-                                <label className="flex items-center gap-3 text-sm text-zinc-400">
-                                    <span className="min-w-30">
-                                        Timeline zoom {timelineZoom}%
+                                <label className="flex items-center gap-2">
+                                    <span className="sr-only">
+                                        Timeline zoom
                                     </span>
+                                    <Button
+                                        size="icon"
+                                        variant="outline"
+                                        className="size-8 border-zinc-700 bg-zinc-950 text-zinc-200 hover:bg-zinc-800"
+                                        onClick={() => changeTimelineZoom(-50)}
+                                        title="Zoom out"
+                                        type="button"
+                                    >
+                                        <Minus className="size-4" />
+                                        <span className="sr-only">
+                                            Zoom out
+                                        </span>
+                                    </Button>
                                     <input
-                                        className="w-56 accent-cyan-500"
-                                        max="500"
+                                        className="w-32 accent-cyan-500"
+                                        max="1000"
                                         min="0"
                                         onChange={(event) =>
                                             setTimelineZoom(
                                                 Number(event.target.value),
                                             )
                                         }
+                                        step="10"
                                         type="range"
                                         value={timelineZoom}
                                     />
+                                    <Button
+                                        size="icon"
+                                        variant="outline"
+                                        className="size-8 border-zinc-700 bg-zinc-950 text-zinc-200 hover:bg-zinc-800"
+                                        onClick={() => changeTimelineZoom(50)}
+                                        title="Zoom in"
+                                        type="button"
+                                    >
+                                        <Plus className="size-4" />
+                                        <span className="sr-only">Zoom in</span>
+                                    </Button>
                                 </label>
                             </div>
 
@@ -1713,10 +2205,13 @@ export default function Editor({
                                     style={{ width: timelineWidth }}
                                 >
                                     <div className="grid grid-cols-[92px_1fr] border-b border-zinc-800 bg-zinc-950 text-xs font-medium text-zinc-500">
-                                        <div className="border-r border-zinc-800 p-3">
-                                            Track
+                                        <div className="border-r border-zinc-800 p-3 font-mono text-lg font-semibold text-zinc-300">
+                                            {formatTimelineTime(playhead)}
                                         </div>
-                                        <div className="relative min-h-10 p-3 font-mono">
+                                        <div
+                                            className="relative min-h-10 cursor-ew-resize border-t border-red-500/70 bg-zinc-900/80 p-3 font-mono"
+                                            onMouseDown={startPlayheadDrag}
+                                        >
                                             {timelineMarks.map((mark) => (
                                                 <span
                                                     className={`absolute top-3 ${
@@ -1734,30 +2229,15 @@ export default function Editor({
                                                     {formatTimelineTime(mark)}
                                                 </span>
                                             ))}
-                                        </div>
-                                    </div>
-
-                                    <div className="grid grid-cols-[92px_1fr]">
-                                        <div className="border-r border-zinc-800 p-3 text-xs text-zinc-500">
-                                            Video 1
-                                        </div>
-                                        <div
-                                            className="relative min-h-24 cursor-crosshair p-3"
-                                            onDragOver={allowTimelineDrop}
-                                            onDrop={(event) =>
-                                                dropOnTimeline(event, 'video')
-                                            }
-                                            onClick={movePlayhead}
-                                        >
                                             {timelineIntervals.map(
                                                 (interval) => (
-                                                    <div
-                                                        className={`pointer-events-none absolute top-0 bottom-0 w-px ${
+                                                    <span
+                                                        className={`pointer-events-none absolute top-0 h-2 w-px ${
                                                             interval % 1 === 0
-                                                                ? 'bg-zinc-700/60'
-                                                                : 'bg-zinc-800/35'
+                                                                ? 'bg-zinc-500/70'
+                                                                : 'bg-zinc-700/60'
                                                         }`}
-                                                        key={`video-${interval}`}
+                                                        key={`ruler-${interval}`}
                                                         style={{
                                                             left: secondsToPixels(
                                                                 interval,
@@ -1766,6 +2246,66 @@ export default function Editor({
                                                     />
                                                 ),
                                             )}
+                                            <span
+                                                className="pointer-events-none absolute top-0 bottom-0 z-30 w-px bg-red-500"
+                                                style={{
+                                                    left: secondsToPixels(
+                                                        playhead,
+                                                    ),
+                                                }}
+                                            />
+                                            <span
+                                                className="pointer-events-none absolute top-0 z-40 h-3 w-3 -translate-x-1/2 rotate-45 rounded-[2px] bg-red-500"
+                                                style={{
+                                                    left: secondsToPixels(
+                                                        playhead,
+                                                    ),
+                                                }}
+                                            />
+                                            {getTimelineDragMarkerStart() !==
+                                                null && (
+                                                <>
+                                                    <span
+                                                        className="pointer-events-none absolute top-0 bottom-0 z-40 w-px bg-red-400"
+                                                        style={{
+                                                            left: secondsToPixels(
+                                                                getTimelineDragMarkerStart() ??
+                                                                    0,
+                                                            ),
+                                                        }}
+                                                    />
+                                                    <span
+                                                        className="pointer-events-none absolute top-0 z-50 h-4 w-4 -translate-x-1/2 rotate-45 rounded-[3px] border border-red-200/70 bg-red-500 shadow-[0_0_12px_rgba(239,68,68,0.45)]"
+                                                        style={{
+                                                            left: secondsToPixels(
+                                                                getTimelineDragMarkerStart() ??
+                                                                    0,
+                                                            ),
+                                                        }}
+                                                    />
+                                                </>
+                                            )}
+                                        </div>
+                                    </div>
+
+                                    <div className="grid grid-cols-[92px_1fr]">
+                                        <div className="border-r border-zinc-800 p-3 text-xs text-zinc-500">
+                                            Video 1
+                                        </div>
+                                        <div
+                                            data-timeline-track
+                                            className="relative min-h-24 p-3"
+                                            onDragLeave={leaveTimelineDrop}
+                                            onDragOver={(event) =>
+                                                allowTimelineDrop(
+                                                    event,
+                                                    'video',
+                                                )
+                                            }
+                                            onDrop={(event) =>
+                                                dropOnTimeline(event, 'video')
+                                            }
+                                        >
                                             <div
                                                 className="absolute top-0 bottom-0 z-20 w-px bg-red-500"
                                                 style={{
@@ -1774,6 +2314,18 @@ export default function Editor({
                                                     ),
                                                 }}
                                             />
+                                            {getTimelineDragMarkerStart() !==
+                                                null && (
+                                                <div
+                                                    className="pointer-events-none absolute top-0 bottom-0 z-30 w-px bg-red-400"
+                                                    style={{
+                                                        left: secondsToPixels(
+                                                            getTimelineDragMarkerStart() ??
+                                                                0,
+                                                        ),
+                                                    }}
+                                                />
+                                            )}
                                             {timelineClips
                                                 .filter(
                                                     (clip) =>
@@ -1781,7 +2333,7 @@ export default function Editor({
                                                 )
                                                 .map((clip) => (
                                                     <button
-                                                        className={`${clip.color} absolute top-3 flex h-14 cursor-grab items-center rounded px-3 text-left text-sm font-medium text-white active:cursor-grabbing ${
+                                                        className={`${clip.color} absolute top-3 flex h-14 cursor-grab items-center overflow-hidden rounded px-3 text-left text-sm font-medium text-white active:cursor-grabbing ${
                                                             selectedClipId ===
                                                             clip.id
                                                                 ? 'ring-2 ring-cyan-300'
@@ -1801,21 +2353,78 @@ export default function Editor({
                                                                 clip,
                                                             )
                                                         }
+                                                        onDragEnd={
+                                                            stopTimelineClipDrag
+                                                        }
                                                         style={{
                                                             left: secondsToPixels(
-                                                                clip.start,
+                                                                getTimelineClipPreviewStart(
+                                                                    clip,
+                                                                ),
                                                             ),
-                                                            width: secondsToPixels(
-                                                                clip.duration,
+                                                            width: Math.max(
+                                                                secondsToPixels(
+                                                                    clip.duration,
+                                                                ),
+                                                                24,
                                                             ),
                                                         }}
                                                         type="button"
                                                     >
+                                                        <span
+                                                            data-resize-handle
+                                                            className="absolute top-0 bottom-0 left-0 z-10 w-2 cursor-ew-resize bg-white/10 transition hover:bg-white/35"
+                                                            onMouseDown={(
+                                                                event,
+                                                            ) =>
+                                                                startClipTrim(
+                                                                    event,
+                                                                    clip,
+                                                                    'left',
+                                                                )
+                                                            }
+                                                        />
                                                         <span className="truncate">
                                                             {clip.name}
                                                         </span>
+                                                        <span
+                                                            data-resize-handle
+                                                            className="absolute top-0 right-0 bottom-0 z-10 w-2 cursor-ew-resize bg-white/10 transition hover:bg-white/35"
+                                                            onMouseDown={(
+                                                                event,
+                                                            ) =>
+                                                                startClipTrim(
+                                                                    event,
+                                                                    clip,
+                                                                    'right',
+                                                                )
+                                                            }
+                                                        />
                                                     </button>
                                                 ))}
+                                            {timelineDropPreview?.track ===
+                                                'video' && (
+                                                <div
+                                                    className={`${getTimelineColor(timelineDropPreview.type)} pointer-events-none absolute top-3 z-10 flex h-14 items-center overflow-hidden rounded border border-white/35 px-3 text-left text-sm font-medium text-white opacity-45`}
+                                                    style={{
+                                                        left: secondsToPixels(
+                                                            timelineDropPreview.start,
+                                                        ),
+                                                        width: Math.max(
+                                                            secondsToPixels(
+                                                                timelineDropPreview.duration,
+                                                            ),
+                                                            24,
+                                                        ),
+                                                    }}
+                                                >
+                                                    <span className="truncate">
+                                                        {
+                                                            timelineDropPreview.name
+                                                        }
+                                                    </span>
+                                                </div>
+                                            )}
                                             {timelineClips.filter(
                                                 (clip) => clip.type !== 'audio',
                                             ).length === 0 && (
@@ -1831,30 +2440,19 @@ export default function Editor({
                                             Audio 1
                                         </div>
                                         <div
-                                            className="relative min-h-16 cursor-crosshair p-3"
-                                            onDragOver={allowTimelineDrop}
+                                            data-timeline-track
+                                            className="relative min-h-16 p-3"
+                                            onDragLeave={leaveTimelineDrop}
+                                            onDragOver={(event) =>
+                                                allowTimelineDrop(
+                                                    event,
+                                                    'audio',
+                                                )
+                                            }
                                             onDrop={(event) =>
                                                 dropOnTimeline(event, 'audio')
                                             }
-                                            onClick={movePlayhead}
                                         >
-                                            {timelineIntervals.map(
-                                                (interval) => (
-                                                    <div
-                                                        className={`pointer-events-none absolute top-0 bottom-0 w-px ${
-                                                            interval % 1 === 0
-                                                                ? 'bg-zinc-700/60'
-                                                                : 'bg-zinc-800/35'
-                                                        }`}
-                                                        key={`audio-${interval}`}
-                                                        style={{
-                                                            left: secondsToPixels(
-                                                                interval,
-                                                            ),
-                                                        }}
-                                                    />
-                                                ),
-                                            )}
                                             <div
                                                 className="absolute top-0 bottom-0 z-20 w-px bg-red-500"
                                                 style={{
@@ -1863,6 +2461,18 @@ export default function Editor({
                                                     ),
                                                 }}
                                             />
+                                            {getTimelineDragMarkerStart() !==
+                                                null && (
+                                                <div
+                                                    className="pointer-events-none absolute top-0 bottom-0 z-30 w-px bg-red-400"
+                                                    style={{
+                                                        left: secondsToPixels(
+                                                            getTimelineDragMarkerStart() ??
+                                                                0,
+                                                        ),
+                                                    }}
+                                                />
+                                            )}
                                             {timelineClips
                                                 .filter(
                                                     (clip) =>
@@ -1870,7 +2480,7 @@ export default function Editor({
                                                 )
                                                 .map((clip) => (
                                                     <button
-                                                        className={`${clip.color} absolute top-3 flex h-9 cursor-grab items-center rounded px-3 text-left text-sm font-medium text-white active:cursor-grabbing ${
+                                                        className={`${clip.color} absolute top-3 flex h-9 cursor-grab items-center overflow-hidden rounded px-3 text-left text-sm font-medium text-white active:cursor-grabbing ${
                                                             selectedClipId ===
                                                             clip.id
                                                                 ? 'ring-2 ring-cyan-300'
@@ -1890,21 +2500,78 @@ export default function Editor({
                                                                 clip,
                                                             )
                                                         }
+                                                        onDragEnd={
+                                                            stopTimelineClipDrag
+                                                        }
                                                         style={{
                                                             left: secondsToPixels(
-                                                                clip.start,
+                                                                getTimelineClipPreviewStart(
+                                                                    clip,
+                                                                ),
                                                             ),
-                                                            width: secondsToPixels(
-                                                                clip.duration,
+                                                            width: Math.max(
+                                                                secondsToPixels(
+                                                                    clip.duration,
+                                                                ),
+                                                                24,
                                                             ),
                                                         }}
                                                         type="button"
                                                     >
+                                                        <span
+                                                            data-resize-handle
+                                                            className="absolute top-0 bottom-0 left-0 z-10 w-2 cursor-ew-resize bg-white/10 transition hover:bg-white/35"
+                                                            onMouseDown={(
+                                                                event,
+                                                            ) =>
+                                                                startClipTrim(
+                                                                    event,
+                                                                    clip,
+                                                                    'left',
+                                                                )
+                                                            }
+                                                        />
                                                         <span className="truncate">
                                                             {clip.name}
                                                         </span>
+                                                        <span
+                                                            data-resize-handle
+                                                            className="absolute top-0 right-0 bottom-0 z-10 w-2 cursor-ew-resize bg-white/10 transition hover:bg-white/35"
+                                                            onMouseDown={(
+                                                                event,
+                                                            ) =>
+                                                                startClipTrim(
+                                                                    event,
+                                                                    clip,
+                                                                    'right',
+                                                                )
+                                                            }
+                                                        />
                                                     </button>
                                                 ))}
+                                            {timelineDropPreview?.track ===
+                                                'audio' && (
+                                                <div
+                                                    className="pointer-events-none absolute top-3 z-10 flex h-9 items-center overflow-hidden rounded border border-white/35 bg-emerald-700/80 px-3 text-left text-sm font-medium text-white opacity-45"
+                                                    style={{
+                                                        left: secondsToPixels(
+                                                            timelineDropPreview.start,
+                                                        ),
+                                                        width: Math.max(
+                                                            secondsToPixels(
+                                                                timelineDropPreview.duration,
+                                                            ),
+                                                            24,
+                                                        ),
+                                                    }}
+                                                >
+                                                    <span className="truncate">
+                                                        {
+                                                            timelineDropPreview.name
+                                                        }
+                                                    </span>
+                                                </div>
+                                            )}
                                             {timelineClips.filter(
                                                 (clip) => clip.type === 'audio',
                                             ).length === 0 && (

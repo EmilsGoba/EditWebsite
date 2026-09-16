@@ -16,11 +16,27 @@ use Illuminate\Support\Carbon;
  * @property string $start
  * @property string $duration
  * @property string $source_start
+ * @property string $scale
+ * @property string $position_x
+ * @property string $position_y
+ * @property string $rotation
  * @property int $sort_order
  * @property Carbon|null $created_at
  * @property Carbon|null $updated_at
  */
-#[Fillable(['project_media_id', 'name', 'type', 'start', 'duration', 'source_start', 'sort_order'])]
+#[Fillable([
+    'project_media_id',
+    'name',
+    'type',
+    'start',
+    'duration',
+    'source_start',
+    'scale',
+    'position_x',
+    'position_y',
+    'rotation',
+    'sort_order',
+])]
 class ProjectTimelineClip extends Model
 {
     /**

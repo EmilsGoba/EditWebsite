@@ -68,6 +68,10 @@ class ProjectController extends Controller
                     'start' => (float) $clip->start,
                     'duration' => (float) $clip->duration,
                     'sourceStart' => (float) $clip->source_start,
+                    'scale' => (float) $clip->scale,
+                    'positionX' => (float) $clip->position_x,
+                    'positionY' => (float) $clip->position_y,
+                    'rotation' => (float) $clip->rotation,
                     'url' => Storage::disk($clip->media->disk)->url($clip->media->path),
                 ]),
         ]);
@@ -243,9 +247,13 @@ class ProjectController extends Controller
             'clips.*.mediaId' => ['required', 'integer'],
             'clips.*.name' => ['required', 'string', 'max:255'],
             'clips.*.type' => ['required', Rule::in(['video', 'image', 'audio'])],
-            'clips.*.start' => ['required', 'numeric', 'min:0', 'max:80'],
-            'clips.*.duration' => ['required', 'numeric', 'min:0.01', 'max:80'],
-            'clips.*.sourceStart' => ['required', 'numeric', 'min:0', 'max:80'],
+            'clips.*.start' => ['required', 'numeric', 'min:0', 'max:3600'],
+            'clips.*.duration' => ['required', 'numeric', 'min:0.01', 'max:3600'],
+            'clips.*.sourceStart' => ['required', 'numeric', 'min:0', 'max:3600'],
+            'clips.*.scale' => ['sometimes', 'numeric', 'min:40', 'max:160'],
+            'clips.*.positionX' => ['sometimes', 'numeric', 'min:-100', 'max:100'],
+            'clips.*.positionY' => ['sometimes', 'numeric', 'min:-100', 'max:100'],
+            'clips.*.rotation' => ['sometimes', 'numeric', 'min:-180', 'max:180'],
         ]);
 
         $mediaIds = $project->media()
@@ -267,6 +275,10 @@ class ProjectController extends Controller
                 'start' => $clip['start'],
                 'duration' => $clip['duration'],
                 'source_start' => $clip['sourceStart'],
+                'scale' => $clip['scale'] ?? 100,
+                'position_x' => $clip['positionX'] ?? 0,
+                'position_y' => $clip['positionY'] ?? 0,
+                'rotation' => $clip['rotation'] ?? 0,
                 'sort_order' => $index,
             ]);
         }

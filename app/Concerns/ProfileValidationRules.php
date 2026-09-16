@@ -28,7 +28,7 @@ trait ProfileValidationRules
      */
     protected function nameRules(): array
     {
-        return ['required', 'string', 'max:255'];
+        return ['required', 'string', 'min:2', 'max:255'];
     }
 
     /**
@@ -41,7 +41,7 @@ trait ProfileValidationRules
         return [
             'required',
             'string',
-            'email',
+            'email:rfc',
             'max:255',
             $userId === null
                 ? Rule::unique(User::class)

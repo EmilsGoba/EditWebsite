@@ -17,9 +17,9 @@ return new class extends Migration
             $table->foreignId('project_media_id')->constrained('project_media')->cascadeOnDelete();
             $table->string('name');
             $table->string('type', 20);
-            $table->decimal('start', 8, 2);
-            $table->decimal('duration', 8, 2);
-            $table->decimal('source_start', 8, 2)->default(0);
+            $table->decimal('start', 10, 6);
+            $table->decimal('duration', 10, 6);
+            $table->decimal('source_start', 10, 6)->default(0);
             $table->unsignedInteger('sort_order')->default(0);
             $table->timestamps();
 
