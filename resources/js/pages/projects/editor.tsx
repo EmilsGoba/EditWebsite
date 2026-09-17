@@ -101,7 +101,8 @@ type TimelineClipMovePreview = {
 
 const effectItems = ['Fade in', 'Blur', 'Color boost', 'Black and white'];
 const uploadLimits =
-    'Videos up to 500 MB, images up to 10 MB, audio up to 50 MB.';
+    'Allowed files: MP4, MOV, JPG, JPEG, PNG, MP3. Videos up to 500 MB, images up to 10 MB, audio up to 50 MB.';
+const acceptedMediaTypes = '.mp4,.mov,.jpg,.jpeg,.png,.mp3';
 const timelineBaseWidth = 1100;
 const defaultTimelineSeconds = 70;
 const timelinePaddingSeconds = 10;
@@ -234,18 +235,20 @@ export default function Editor({
         };
     }, [project.format]);
 
-    const timelineDuration = useMemo(() => {
-        const lastClipEnd = timelineClips.reduce(
+    const timelineContentEnd = useMemo(() => {
+        return timelineClips.reduce(
             (lastEnd, clip) => Math.max(lastEnd, clip.start + clip.duration),
             0,
         );
+    }, [timelineClips]);
 
+    const timelineDuration = useMemo(() => {
         // The timeline starts at 1:10, then grows after the last clip with a small empty work area.
         return Math.max(
             defaultTimelineSeconds,
-            snapToTimelineStep(lastClipEnd + timelinePaddingSeconds),
+            snapToTimelineStep(timelineContentEnd + timelinePaddingSeconds),
         );
-    }, [timelineClips]);
+    }, [timelineContentEnd]);
 
     const timelinePixelsPerSecond = useMemo(
         () =>
@@ -334,14 +337,14 @@ export default function Editor({
 
         const timer = window.setInterval(() => {
             setPlayhead((currentTime) => {
-                if (currentTime >= timelineDuration) {
+                if (currentTime >= timelineContentEnd) {
                     setIsPlaying(false);
-                    return timelineDuration;
+                    return snapToTimelineStep(timelineContentEnd);
                 }
 
                 return snapToTimelineStep(
                     Math.min(
-                        timelineDuration,
+                        timelineContentEnd,
                         currentTime + timelineFrameDurationSeconds,
                     ),
                 );
@@ -349,7 +352,7 @@ export default function Editor({
         }, timelinePlaybackIntervalMs);
 
         return () => window.clearInterval(timer);
-    }, [activeAudioClip, activeClip?.type, isPlaying, timelineDuration]);
+    }, [activeAudioClip, activeClip?.type, isPlaying, timelineContentEnd]);
 
     useEffect(() => {
         const timelineScroll = timelineScrollRef.current;
@@ -419,6 +422,7 @@ export default function Editor({
         if (isPlaying) {
             // Browsers allow muted video playback, so this connects our timeline play button to the preview.
             if (previewVideo.paused) {
+                previewVideo.currentTime = clipTime;
                 void previewVideo.play();
             }
         } else {
@@ -437,7 +441,7 @@ export default function Editor({
         );
 
         return () => window.clearInterval(timer);
-    }, [activeClip, isPlaying]);
+    }, [activeClip, isPlaying, timelineContentEnd]);
 
     useEffect(() => {
         const timelineAudio = timelineAudioRef.current;
@@ -481,7 +485,7 @@ export default function Editor({
         );
 
         return () => window.clearInterval(timer);
-    }, [activeAudioClip, activeClip?.type, isPlaying]);
+    }, [activeAudioClip, activeClip?.type, isPlaying, timelineContentEnd]);
 
     useEffect(() => {
         function handleTimelineKeyboard(event: KeyboardEvent) {
@@ -1178,8 +1182,12 @@ export default function Editor({
 
         if (nextTime >= clipEnd) {
             previewVideo.pause();
-            setIsPlaying(false);
             setPlayhead(snapToTimelineStep(clipEnd));
+
+            if (clipEnd >= timelineContentEnd) {
+                setIsPlaying(false);
+            }
+
             return;
         }
 
@@ -1202,12 +1210,48 @@ export default function Editor({
 
         if (nextTime >= clipEnd) {
             timelineAudio.pause();
-            setIsPlaying(false);
             setPlayhead(snapToTimelineStep(clipEnd));
+
+            if (clipEnd >= timelineContentEnd) {
+                setIsPlaying(false);
+            }
+
             return;
         }
 
         setPlayhead(nextTime);
+    }
+
+    function finishCurrentPreviewVideo() {
+        if (!activeClip || activeClip.type !== 'video') {
+            return;
+        }
+
+        const clipEnd = snapToTimelineStep(
+            activeClip.start + activeClip.duration,
+        );
+
+        setPlayhead(clipEnd);
+
+        if (clipEnd >= timelineContentEnd) {
+            setIsPlaying(false);
+        }
+    }
+
+    function finishCurrentTimelineAudio() {
+        if (!activeAudioClip) {
+            return;
+        }
+
+        const clipEnd = snapToTimelineStep(
+            activeAudioClip.start + activeAudioClip.duration,
+        );
+
+        setPlayhead(clipEnd);
+
+        if (clipEnd >= timelineContentEnd) {
+            setIsPlaying(false);
+        }
     }
 
     function cutSelectedClip() {
@@ -1372,6 +1416,14 @@ export default function Editor({
 
     function togglePlayback() {
         // This controls the shared play/pause state for the preview video, audio track, and timeline playhead.
+        if (
+            !isPlaying &&
+            timelineContentEnd > 0 &&
+            playhead >= timelineContentEnd
+        ) {
+            setPlayhead(0);
+        }
+
         setIsPlaying((currentValue) => !currentValue);
     }
 
@@ -1440,7 +1492,7 @@ export default function Editor({
                 <audio
                     key={activeAudioClip.id}
                     ref={timelineAudioRef}
-                    onEnded={() => setIsPlaying(false)}
+                    onEnded={finishCurrentTimelineAudio}
                     preload="metadata"
                     src={activeAudioClip.url}
                 />
@@ -1560,7 +1612,7 @@ export default function Editor({
                                     </div>
                                     <input
                                         ref={fileInputRef}
-                                        accept="video/*,image/*,audio/*"
+                                        accept={acceptedMediaTypes}
                                         className="hidden"
                                         onChange={uploadMedia}
                                         type="file"
@@ -1784,8 +1836,8 @@ export default function Editor({
                                                 ref={previewVideoRef}
                                                 className="size-full object-cover"
                                                 muted
-                                                onEnded={() =>
-                                                    setIsPlaying(false)
+                                                onEnded={
+                                                    finishCurrentPreviewVideo
                                                 }
                                                 onTimeUpdate={
                                                     updatePlayheadFromPreviewVideo

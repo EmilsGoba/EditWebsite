@@ -261,6 +261,23 @@ test('users can upload media to their own project', function () {
     Storage::disk('public')->assertExists($media->path);
 });
 
+test('users cannot upload unsupported media formats', function () {
+    Storage::fake('public');
+
+    $user = User::factory()->create();
+    $project = Project::factory()->for($user)->create();
+    $file = UploadedFile::fake()->create('sample-video.webm', 2048, 'video/webm');
+
+    $this->actingAs($user)
+        ->post(route('projects.media.store', $project), [
+            'type' => 'video',
+            'file' => $file,
+        ])
+        ->assertSessionHasErrors('file');
+
+    expect(ProjectMedia::count())->toBe(0);
+});
+
 test('users cannot upload media to another users project', function () {
     Storage::fake('public');
 

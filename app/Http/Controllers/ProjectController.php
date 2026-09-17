@@ -174,9 +174,9 @@ class ProjectController extends Controller
             'audio' => 51200,
         ];
         $mimeTypes = [
-            'video' => ['video/mp4', 'video/quicktime', 'video/webm', 'video/x-msvideo', 'video/x-matroska'],
-            'image' => ['image/jpeg', 'image/png', 'image/webp', 'image/gif'],
-            'audio' => ['audio/mpeg', 'audio/wav', 'audio/x-wav', 'audio/mp4', 'audio/x-m4a', 'audio/aac', 'audio/x-aac', 'audio/ogg', 'audio/flac'],
+            'video' => ['video/mp4', 'video/quicktime'],
+            'image' => ['image/jpeg', 'image/png'],
+            'audio' => ['audio/mpeg'],
         ];
 
         $request->validate([
