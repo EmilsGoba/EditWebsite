@@ -94,6 +94,36 @@ class ProjectController extends Controller
                 'status',
                 'created_at',
             ]),
+            'media' => $project->media()
+                ->latest()
+                ->get()
+                ->map(fn ($media) => [
+                    'id' => $media->id,
+                    'type' => $media->type,
+                    'name' => $media->original_name,
+                    'mime_type' => $media->mime_type,
+                    'size' => $media->size,
+                    'url' => Storage::disk($media->disk)->url($media->path),
+                    'created_at' => $media->created_at,
+                ]),
+            'timelineClips' => $project->timelineClips()
+                ->with('media')
+                ->orderBy('sort_order')
+                ->get()
+                ->map(fn ($clip) => [
+                    'id' => $clip->id,
+                    'mediaId' => $clip->project_media_id,
+                    'name' => $clip->name,
+                    'type' => $clip->type,
+                    'start' => (float) $clip->start,
+                    'duration' => (float) $clip->duration,
+                    'sourceStart' => (float) $clip->source_start,
+                    'scale' => (float) $clip->scale,
+                    'positionX' => (float) $clip->position_x,
+                    'positionY' => (float) $clip->position_y,
+                    'rotation' => (float) $clip->rotation,
+                    'url' => Storage::disk($clip->media->disk)->url($clip->media->path),
+                ]),
         ]);
     }
 

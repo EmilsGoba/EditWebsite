@@ -97,13 +97,37 @@ test('users can open their own project export page', function () {
     $project = Project::factory()->for($user)->create([
         'name' => 'Export project',
     ]);
+    $media = $project->media()->create([
+        'type' => 'video',
+        'original_name' => 'export-video.mp4',
+        'path' => 'projects/'.$project->id.'/media/export-video.mp4',
+        'disk' => 'public',
+        'mime_type' => 'video/mp4',
+        'size' => 2048,
+    ]);
+    $clip = $project->timelineClips()->create([
+        'project_media_id' => $media->id,
+        'type' => 'video',
+        'name' => 'export-video.mp4',
+        'start' => 0,
+        'duration' => 12,
+        'source_start' => 0,
+        'sort_order' => 0,
+    ]);
 
     $this->actingAs($user)
         ->get(route('projects.export', $project))
         ->assertInertia(fn (Assert $page) => $page
             ->component('projects/export')
             ->where('project.id', $project->id)
-            ->where('project.name', 'Export project'),
+            ->where('project.name', 'Export project')
+            ->has('media', 1)
+            ->where('media.0.id', $media->id)
+            ->where('media.0.name', 'export-video.mp4')
+            ->has('timelineClips', 1)
+            ->where('timelineClips.0.id', $clip->id)
+            ->where('timelineClips.0.mediaId', $media->id)
+            ->where('timelineClips.0.duration', 12),
         );
 });
 
