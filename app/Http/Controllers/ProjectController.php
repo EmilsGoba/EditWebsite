@@ -9,6 +9,8 @@ use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\Rule;
 use Inertia\Inertia;
 use Inertia\Response;
+use Symfony\Component\HttpFoundation\BinaryFileResponse;
+use Symfony\Component\Process\Process;
 
 class ProjectController extends Controller
 {
@@ -123,8 +125,126 @@ class ProjectController extends Controller
                     'positionY' => (float) $clip->position_y,
                     'rotation' => (float) $clip->rotation,
                     'url' => Storage::disk($clip->media->disk)->url($clip->media->path),
-                ]),
+            ]),
         ]);
+    }
+
+    /**
+     * Render the saved visual timeline into a downloadable video file.
+     */
+    public function renderExport(Request $request, Project $project): RedirectResponse|BinaryFileResponse
+    {
+        $project = $request->user()->projects()->findOrFail($project->id);
+
+        $validated = $request->validate([
+            'file_type' => ['required', Rule::in(['mp4', 'mov'])],
+            'quality' => ['required', Rule::in(['720p', '1080p', 'Original'])],
+        ]);
+        $clips = $project->timelineClips()
+            ->with('media')
+            ->orderBy('sort_order')
+            ->get();
+        $visualClips = $clips
+            ->filter(fn ($clip) => $clip->type !== 'audio')
+            ->values();
+
+        if ($visualClips->isEmpty()) {
+            return back()->withErrors([
+                'export' => __('Add at least one video or image fragment before exporting.'),
+            ]);
+        }
+
+        $ffmpegPath = $this->ffmpegPath();
+
+        if ($ffmpegPath === '') {
+            return back()->withErrors([
+                'export' => __('FFmpeg is not installed. Install it on your Mac with: brew install ffmpeg'),
+            ]);
+        }
+
+        $renderSize = $this->exportRenderSize($project->format, $validated['quality']);
+        $temporaryDirectory = storage_path('app/exports');
+
+        if (! is_dir($temporaryDirectory)) {
+            mkdir($temporaryDirectory, 0755, true);
+        }
+
+        $extension = $validated['file_type'];
+        $outputPath = $temporaryDirectory.'/project-'.$project->id.'-'.now()->format('YmdHis').'.'.$extension;
+        $command = [$ffmpegPath, '-y'];
+        $filters = [];
+        $concatInputs = [];
+
+        foreach ($visualClips as $index => $clip) {
+            $mediaPath = Storage::disk($clip->media->disk)->path($clip->media->path);
+
+            if ($clip->type === 'image') {
+                array_push(
+                    $command,
+                    '-loop',
+                    '1',
+                    '-t',
+                    (string) $clip->duration,
+                    '-i',
+                    $mediaPath,
+                );
+            } else {
+                array_push(
+                    $command,
+                    '-ss',
+                    (string) $clip->source_start,
+                    '-t',
+                    (string) $clip->duration,
+                    '-i',
+                    $mediaPath,
+                );
+            }
+
+            $filters[] = sprintf(
+                '[%d:v]scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,fps=30,setsar=1,format=yuv420p[v%d]',
+                $index,
+                $renderSize['width'],
+                $renderSize['height'],
+                $renderSize['width'],
+                $renderSize['height'],
+                $index,
+            );
+            $concatInputs[] = '[v'.$index.']';
+        }
+
+        $filters[] = implode('', $concatInputs).'concat=n='.$visualClips->count().':v=1:a=0[outv]';
+
+        array_push(
+            $command,
+            '-filter_complex',
+            implode(';', $filters),
+            '-map',
+            '[outv]',
+            '-an',
+            '-c:v',
+            'libx264',
+            '-pix_fmt',
+            'yuv420p',
+            '-movflags',
+            '+faststart',
+            $outputPath,
+        );
+
+        $process = new Process($command);
+        $process->setTimeout(300);
+        $process->run();
+
+        if (! $process->isSuccessful() || ! file_exists($outputPath)) {
+            report(new \RuntimeException($process->getErrorOutput()));
+
+            return back()->withErrors([
+                'export' => __('Video export failed. Check that uploaded files are valid video or image files.'),
+            ]);
+        }
+
+        return response()
+            ->download($outputPath, str($project->name)->slug()->append('.'.$extension)->toString())
+            ->deleteFileAfterSend();
     }
 
     /**
@@ -319,6 +439,48 @@ class ProjectController extends Controller
         ]);
 
         return to_route('projects.edit', $project);
+    }
+
+    /**
+     * Pick the server render size from project format and export quality.
+     */
+    private function exportRenderSize(string $format, string $quality): array
+    {
+        if ($format === '9:16') {
+            return $quality === '720p'
+                ? ['width' => 720, 'height' => 1280]
+                : ['width' => 1080, 'height' => 1920];
+        }
+
+        if ($format === '1:1') {
+            return $quality === '720p'
+                ? ['width' => 720, 'height' => 720]
+                : ['width' => 1080, 'height' => 1080];
+        }
+
+        return $quality === '720p'
+            ? ['width' => 1280, 'height' => 720]
+            : ['width' => 1920, 'height' => 1080];
+    }
+
+    /**
+     * MAMP/PHP may not inherit the terminal PATH, so also check Homebrew's usual FFmpeg locations.
+     */
+    private function ffmpegPath(): string
+    {
+        $paths = [
+            trim((string) shell_exec('command -v ffmpeg 2>/dev/null')),
+            '/opt/homebrew/bin/ffmpeg',
+            '/usr/local/bin/ffmpeg',
+        ];
+
+        foreach ($paths as $path) {
+            if ($path !== '' && is_file($path) && is_executable($path)) {
+                return $path;
+            }
+        }
+
+        return '';
     }
 
     /**

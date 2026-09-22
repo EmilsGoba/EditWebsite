@@ -9,6 +9,7 @@ Route::middleware(['auth', 'verified'])->group(function () {
     Route::get('dashboard', [ProjectController::class, 'index'])->name('dashboard');
     Route::get('projects/{project}/edit', [ProjectController::class, 'edit'])->name('projects.edit');
     Route::get('projects/{project}/export', [ProjectController::class, 'export'])->name('projects.export');
+    Route::get('projects/{project}/export/render', [ProjectController::class, 'renderExport'])->name('projects.export.render');
     Route::post('projects', [ProjectController::class, 'store'])->name('projects.store');
     Route::post('projects/{project}/media', [ProjectController::class, 'uploadMedia'])->name('projects.media.store');
     Route::delete('projects/{project}/media', [ProjectController::class, 'destroyMedia'])->name('projects.media.destroy');
