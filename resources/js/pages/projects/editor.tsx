@@ -89,6 +89,7 @@ type TimelineDropPreview = {
     type: ProjectMedia['type'];
     start: number;
     duration: number;
+    canPlace: boolean;
 };
 
 type TimelineClipMovePreview = {
@@ -111,6 +112,7 @@ const timelineFramesPerSecond = 60;
 const timelineFrameDurationSeconds = 1 / timelineFramesPerSecond;
 const timelinePlaybackIntervalMs = 1000 / timelineFramesPerSecond;
 const visibleTimelineIntervalSeconds = 0.1;
+const timelineOverlapGapSeconds = timelineFrameDurationSeconds;
 const mediaDragType = 'application/x-video-editor-media';
 const clipDragType = 'application/x-video-editor-clip';
 const defaultClipProperties = {
@@ -154,6 +156,9 @@ export default function Editor({
     const timelineAudioRef = useRef<HTMLAudioElement>(null);
     const timelineScrollRef = useRef<HTMLDivElement>(null);
     const latestTrimClipsRef = useRef<TimelineClip[] | null>(null);
+    const autoSaveTimerRef = useRef<number | null>(null);
+    const hasAutoSaveMountedRef = useRef(false);
+    const activeSaveRequestRef = useRef(0);
     const [isPlaying, setIsPlaying] = useState(false);
     const [isUploading, setIsUploading] = useState(false);
     const [uploadError, setUploadError] = useState<string | null>(null);
@@ -184,6 +189,7 @@ export default function Editor({
     const [playhead, setPlayhead] = useState(0);
     const [isSavingTimeline, setIsSavingTimeline] = useState(false);
     const [saveStatus, setSaveStatus] = useState<'saved' | 'unsaved'>('saved');
+    const [isAutoSaveEnabled, setIsAutoSaveEnabled] = useState(false);
     const [selectedTool, setSelectedTool] = useState<'select' | 'cut'>(
         'select',
     );
@@ -201,6 +207,10 @@ export default function Editor({
         useState<TimelineDropPreview | null>(null);
     const [timelineClipMovePreview, setTimelineClipMovePreview] =
         useState<TimelineClipMovePreview | null>(null);
+    const latestTimelineClipsRef = useRef<TimelineClip[]>(initialTimelineClips);
+    const latestTimelineSignatureRef = useRef(
+        getTimelineSaveSignature(initialTimelineClips),
+    );
 
     const previewLabel = useMemo(() => {
         if (project.format === '9:16') {
@@ -329,6 +339,16 @@ export default function Editor({
             ),
         [timelineDuration],
     );
+
+    const timelineSignature = useMemo(
+        () => getTimelineSaveSignature(timelineClips),
+        [timelineClips],
+    );
+
+    useEffect(() => {
+        latestTimelineClipsRef.current = timelineClips;
+        latestTimelineSignatureRef.current = timelineSignature;
+    }, [timelineClips, timelineSignature]);
 
     useEffect(() => {
         if (!isPlaying || activeClip?.type === 'video' || activeAudioClip) {
@@ -486,6 +506,35 @@ export default function Editor({
 
         return () => window.clearInterval(timer);
     }, [activeAudioClip, activeClip?.type, isPlaying, timelineContentEnd]);
+
+    useEffect(() => {
+        if (!hasAutoSaveMountedRef.current) {
+            hasAutoSaveMountedRef.current = true;
+            return;
+        }
+
+        if (
+            !isAutoSaveEnabled ||
+            saveStatus !== 'unsaved' ||
+            isSavingTimeline
+        ) {
+            return;
+        }
+
+        if (autoSaveTimerRef.current) {
+            window.clearTimeout(autoSaveTimerRef.current);
+        }
+
+        autoSaveTimerRef.current = window.setTimeout(() => {
+            saveTimeline(latestTimelineClipsRef.current, true);
+        }, 1200);
+
+        return () => {
+            if (autoSaveTimerRef.current) {
+                window.clearTimeout(autoSaveTimerRef.current);
+            }
+        };
+    }, [isAutoSaveEnabled, isSavingTimeline, saveStatus, timelineSignature]);
 
     useEffect(() => {
         function handleTimelineKeyboard(event: KeyboardEvent) {
@@ -681,30 +730,59 @@ export default function Editor({
         setSaveStatus('unsaved');
     }
 
-    function saveTimeline() {
+    function getTimelineSavePayload(clips: TimelineClip[], autoSave = false) {
+        return {
+            autoSave,
+            clips: clips.map((clip) => ({
+                mediaId: clip.mediaId,
+                name: clip.name,
+                type: clip.type,
+                start: clip.start,
+                duration: clip.duration,
+                sourceStart: clip.sourceStart,
+                scale: clip.scale,
+                positionX: clip.positionX,
+                positionY: clip.positionY,
+                rotation: clip.rotation,
+            })),
+        };
+    }
+
+    function getTimelineSaveSignature(clips: TimelineClip[]) {
+        return JSON.stringify(getTimelineSavePayload(clips).clips);
+    }
+
+    function saveTimeline(clipsToSave = timelineClips, autoSave = false) {
+        if (isSavingTimeline) {
+            return;
+        }
+
+        const saveRequestId = activeSaveRequestRef.current + 1;
+        const savedTimelineSignature = getTimelineSaveSignature(clipsToSave);
+
+        activeSaveRequestRef.current = saveRequestId;
         setIsSavingTimeline(true);
 
         // This saves the current timeline layout to MySQL, so it can load again after refresh.
         router.put(
             `/projects/${project.id}/timeline`,
-            {
-                clips: timelineClips.map((clip) => ({
-                    mediaId: clip.mediaId,
-                    name: clip.name,
-                    type: clip.type,
-                    start: clip.start,
-                    duration: clip.duration,
-                    sourceStart: clip.sourceStart,
-                    scale: clip.scale,
-                    positionX: clip.positionX,
-                    positionY: clip.positionY,
-                    rotation: clip.rotation,
-                })),
-            },
+            getTimelineSavePayload(clipsToSave, autoSave),
             {
                 preserveScroll: true,
-                onSuccess: () => setSaveStatus('saved'),
-                onFinish: () => setIsSavingTimeline(false),
+                onError: () => setSaveStatus('unsaved'),
+                onSuccess: () => {
+                    setSaveStatus(
+                        savedTimelineSignature ===
+                            latestTimelineSignatureRef.current
+                            ? 'saved'
+                            : 'unsaved',
+                    );
+                },
+                onFinish: () => {
+                    if (activeSaveRequestRef.current === saveRequestId) {
+                        setIsSavingTimeline(false);
+                    }
+                },
             },
         );
     }
@@ -759,9 +837,160 @@ export default function Editor({
         return mediaDurations[item.id] ?? getTemporaryClipDuration(item.type);
     }
 
+    function getClipTrack(clip: Pick<TimelineClip, 'type'>) {
+        return clip.type === 'audio' ? 'audio' : 'video';
+    }
+
+    function timelineClipOverlaps(
+        clip: Pick<TimelineClip, 'start' | 'duration' | 'type'>,
+        otherClip: Pick<TimelineClip, 'start' | 'duration' | 'type'>,
+    ) {
+        if (getClipTrack(clip) !== getClipTrack(otherClip)) {
+            return false;
+        }
+
+        const clipStart = snapToTimelineStep(clip.start);
+        const clipEnd = snapToTimelineStep(clip.start + clip.duration);
+        const otherStart = snapToTimelineStep(otherClip.start);
+        const otherEnd = snapToTimelineStep(
+            otherClip.start + otherClip.duration,
+        );
+
+        return clipStart < otherEnd && clipEnd > otherStart;
+    }
+
+    function canPlaceTimelineClips(
+        nextClips: TimelineClip[],
+        existingClips = timelineClips,
+        ignoredClipIds: number[] = [],
+    ) {
+        const checkedClips = existingClips.filter(
+            (clip) => !ignoredClipIds.includes(clip.id),
+        );
+
+        return nextClips.every(
+            (nextClip) =>
+                !checkedClips.some((clip) =>
+                    timelineClipOverlaps(nextClip, clip),
+                ),
+        );
+    }
+
+    function getPreviousClipEnd(
+        clip: TimelineClip,
+        existingClips: TimelineClip[],
+        ignoredClipIds: number[],
+    ) {
+        return existingClips
+            .filter(
+                (otherClip) =>
+                    !ignoredClipIds.includes(otherClip.id) &&
+                    getClipTrack(otherClip) === getClipTrack(clip) &&
+                    otherClip.start + otherClip.duration <=
+                        clip.start + timelineOverlapGapSeconds,
+            )
+            .reduce(
+                (previousEnd, otherClip) =>
+                    Math.max(previousEnd, otherClip.start + otherClip.duration),
+                0,
+            );
+    }
+
+    function getNextClipStart(
+        clip: TimelineClip,
+        existingClips: TimelineClip[],
+        ignoredClipIds: number[],
+    ) {
+        return existingClips
+            .filter(
+                (otherClip) =>
+                    !ignoredClipIds.includes(otherClip.id) &&
+                    getClipTrack(otherClip) === getClipTrack(clip) &&
+                    otherClip.start >=
+                        clip.start + clip.duration - timelineOverlapGapSeconds,
+            )
+            .reduce(
+                (nextStart, otherClip) => Math.min(nextStart, otherClip.start),
+                Number.POSITIVE_INFINITY,
+            );
+    }
+
+    function getTimelineMoveBounds(
+        movingClips: TimelineClip[],
+        existingClips: TimelineClip[],
+        ignoredClipIds: number[],
+    ) {
+        return movingClips.reduce(
+            (bounds, clip) => {
+                const previousEnd = getPreviousClipEnd(
+                    clip,
+                    existingClips,
+                    ignoredClipIds,
+                );
+                const nextStart = getNextClipStart(
+                    clip,
+                    existingClips,
+                    ignoredClipIds,
+                );
+
+                return {
+                    minMove: Math.max(bounds.minMove, previousEnd - clip.start),
+                    maxMove: Math.min(
+                        bounds.maxMove,
+                        Number.isFinite(nextStart)
+                            ? nextStart - (clip.start + clip.duration)
+                            : Number.POSITIVE_INFINITY,
+                    ),
+                };
+            },
+            {
+                minMove: Number.NEGATIVE_INFINITY,
+                maxMove: Number.POSITIVE_INFINITY,
+            },
+        );
+    }
+
+    function getLinkedTimelineClips(clipToMatch: TimelineClip) {
+        const linkedClipIds = getLinkedClipIds(clipToMatch);
+
+        return timelineClips.filter((clip) => linkedClipIds.includes(clip.id));
+    }
+
+    function getConstrainedTimelineMoveStart(clipId: number, start: number) {
+        const movingClip = timelineClips.find((clip) => clip.id === clipId);
+
+        if (!movingClip) {
+            return snapToTimelineStep(Math.max(0, start));
+        }
+
+        const movingClips = getLinkedTimelineClips(movingClip);
+        const ignoredClipIds = movingClips.map((clip) => clip.id);
+        const desiredMove =
+            snapToTimelineStep(Math.max(0, start)) - movingClip.start;
+        const moveBounds = getTimelineMoveBounds(
+            movingClips,
+            timelineClips,
+            ignoredClipIds,
+        );
+        const minMove = Math.max(moveBounds.minMove, -movingClip.start);
+        const constrainedMove = Math.min(
+            Math.max(desiredMove, minMove),
+            moveBounds.maxMove,
+        );
+
+        return snapToTimelineStep(
+            Math.max(0, movingClip.start + constrainedMove),
+        );
+    }
+
     function addMediaToTimelineAt(item: ProjectMedia, start: number) {
-        const nextClips = createTimelineClipsFromMedia(item, start);
+        const nextStart = snapToTimelineStep(Math.max(0, start));
+        const nextClips = createTimelineClipsFromMedia(item, nextStart);
         const primaryClip = nextClips[0];
+
+        if (!canPlaceTimelineClips(nextClips)) {
+            return;
+        }
 
         saveTimelineChange([...timelineClips, ...nextClips]);
         setSelectedClipId(primaryClip.id);
@@ -775,7 +1004,7 @@ export default function Editor({
             return;
         }
 
-        const nextStart = snapToTimelineStep(Math.max(0, start));
+        const nextStart = getConstrainedTimelineMoveStart(clipId, start);
         const moveDistance = nextStart - movingClip.start;
 
         if (moveDistance === 0) {
@@ -784,14 +1013,7 @@ export default function Editor({
         }
 
         // If a video clip still lines up with its extracted audio, move both together.
-        const linkedClipIds = timelineClips
-            .filter(
-                (clip) =>
-                    clip.mediaId === movingClip.mediaId &&
-                    Math.abs(clip.start - movingClip.start) < 0.001 &&
-                    Math.abs(clip.duration - movingClip.duration) < 0.001,
-            )
-            .map((clip) => clip.id);
+        const linkedClipIds = getLinkedClipIds(movingClip);
 
         saveTimelineChange(
             timelineClips.map((clip) =>
@@ -891,14 +1113,27 @@ export default function Editor({
             pointerClientX - trimState.trackLeft,
         );
         const minimumDuration = timelineFrameDurationSeconds;
-        const originalDuration = getOriginalClipDuration(baseClip);
+        const linkedClips = trimState.startingClips.filter((clip) =>
+            trimState.linkedClipIds.includes(clip.id),
+        );
         let nextStart = baseClip.start;
         let nextDuration = baseClip.duration;
         let nextSourceStart = baseClip.sourceStart;
 
         if (trimState.edge === 'right') {
-            const maxEnd =
-                baseClip.start + originalDuration - baseClip.sourceStart;
+            const maxEnd = linkedClips.reduce((endLimit, clip) => {
+                const sourceMaxEnd =
+                    clip.start +
+                    getOriginalClipDuration(clip) -
+                    clip.sourceStart;
+                const nextClipStart = getNextClipStart(
+                    clip,
+                    trimState.startingClips,
+                    trimState.linkedClipIds,
+                );
+
+                return Math.min(endLimit, sourceMaxEnd, nextClipStart);
+            }, Number.POSITIVE_INFINITY);
             const nextEnd = snapToTimelineStep(
                 Math.min(
                     Math.max(pointerTime, baseClip.start + minimumDuration),
@@ -909,11 +1144,25 @@ export default function Editor({
             nextDuration = snapToTimelineStep(nextEnd - baseClip.start);
         } else {
             const clipEnd = baseClip.start + baseClip.duration;
-            const earliestStart = Math.max(
-                0,
-                baseClip.start - baseClip.sourceStart,
-                clipEnd - originalDuration,
-            );
+            const earliestStart = linkedClips.reduce((startLimit, clip) => {
+                const currentClipEnd = clip.start + clip.duration;
+                const sourceMinStart = clip.start - clip.sourceStart;
+                const sourceMaxStart =
+                    currentClipEnd - getOriginalClipDuration(clip);
+                const previousClipEnd = getPreviousClipEnd(
+                    clip,
+                    trimState.startingClips,
+                    trimState.linkedClipIds,
+                );
+
+                return Math.max(
+                    startLimit,
+                    sourceMinStart,
+                    sourceMaxStart,
+                    previousClipEnd,
+                );
+            }, 0);
+
             nextStart = snapToTimelineStep(
                 Math.min(
                     Math.max(pointerTime, earliestStart),
@@ -1063,14 +1312,23 @@ export default function Editor({
                 return;
             }
 
+            const previewStart = snapToTimelineStep(
+                getTimelineDropStart(event),
+            );
+            const previewClips = createTimelineClipsFromMedia(
+                draggingMedia,
+                previewStart,
+            );
+
             event.preventDefault();
             event.dataTransfer.dropEffect = 'copy';
             setTimelineDropPreview({
                 track,
                 name: draggingMedia.name,
                 type: draggingMedia.type,
-                start: getTimelineDropStart(event),
+                start: previewStart,
                 duration: getMediaTimelineDuration(draggingMedia),
+                canPlace: canPlaceTimelineClips(previewClips),
             });
             return;
         }
@@ -1087,9 +1345,12 @@ export default function Editor({
 
                 setTimelineClipMovePreview({
                     ...timelineClipMovePreview,
-                    previewStart: getTimelineDropStart(
-                        event,
-                        timelineClipMovePreview.offsetPixels,
+                    previewStart: getConstrainedTimelineMoveStart(
+                        draggedClip.id,
+                        getTimelineDropStart(
+                            event,
+                            timelineClipMovePreview.offsetPixels,
+                        ),
                     ),
                 });
             }
@@ -1533,10 +1794,38 @@ export default function Editor({
                                     ? 'Saved'
                                     : 'Unsaved changes'}
                             </span>
+                            <button
+                                aria-checked={isAutoSaveEnabled}
+                                className="flex items-center gap-2 rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-medium text-zinc-300 transition hover:border-zinc-700 hover:bg-zinc-900"
+                                onClick={() =>
+                                    setIsAutoSaveEnabled(
+                                        (currentValue) => !currentValue,
+                                    )
+                                }
+                                role="switch"
+                                type="button"
+                            >
+                                Auto save
+                                <span
+                                    className={`flex h-5 w-9 items-center rounded-full p-0.5 transition ${
+                                        isAutoSaveEnabled
+                                            ? 'bg-cyan-500'
+                                            : 'bg-zinc-800'
+                                    }`}
+                                >
+                                    <span
+                                        className={`h-4 w-4 rounded-full bg-white transition ${
+                                            isAutoSaveEnabled
+                                                ? 'translate-x-4'
+                                                : 'translate-x-0'
+                                        }`}
+                                    />
+                                </span>
+                            </button>
                             <Button
                                 className="gap-2 border-zinc-700 bg-zinc-950 text-zinc-200 hover:bg-zinc-800"
                                 disabled={isSavingTimeline}
-                                onClick={saveTimeline}
+                                onClick={() => saveTimeline()}
                                 type="button"
                                 variant="outline"
                             >
@@ -2457,7 +2746,11 @@ export default function Editor({
                                             {timelineDropPreview?.track ===
                                                 'video' && (
                                                 <div
-                                                    className={`${getTimelineColor(timelineDropPreview.type)} pointer-events-none absolute top-3 z-10 flex h-14 items-center overflow-hidden rounded border border-white/35 px-3 text-left text-sm font-medium text-white opacity-45`}
+                                                    className={`${timelineDropPreview.canPlace ? getTimelineColor(timelineDropPreview.type) : 'bg-red-500/80'} pointer-events-none absolute top-3 z-10 flex h-14 items-center overflow-hidden rounded border px-3 text-left text-sm font-medium text-white opacity-45 ${
+                                                        timelineDropPreview.canPlace
+                                                            ? 'border-white/35'
+                                                            : 'border-red-200'
+                                                    }`}
                                                     style={{
                                                         left: secondsToPixels(
                                                             timelineDropPreview.start,
@@ -2604,7 +2897,11 @@ export default function Editor({
                                             {timelineDropPreview?.track ===
                                                 'audio' && (
                                                 <div
-                                                    className="pointer-events-none absolute top-3 z-10 flex h-9 items-center overflow-hidden rounded border border-white/35 bg-emerald-700/80 px-3 text-left text-sm font-medium text-white opacity-45"
+                                                    className={`pointer-events-none absolute top-3 z-10 flex h-9 items-center overflow-hidden rounded border px-3 text-left text-sm font-medium text-white opacity-45 ${
+                                                        timelineDropPreview.canPlace
+                                                            ? 'border-white/35 bg-emerald-700/80'
+                                                            : 'border-red-200 bg-red-500/80'
+                                                    }`}
                                                     style={{
                                                         left: secondsToPixels(
                                                             timelineDropPreview.start,

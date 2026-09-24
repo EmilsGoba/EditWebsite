@@ -5,8 +5,10 @@ namespace App\Http\Controllers;
 use App\Models\Project;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 use Inertia\Inertia;
 use Inertia\Response;
 use Symfony\Component\HttpFoundation\BinaryFileResponse;
@@ -147,6 +149,9 @@ class ProjectController extends Controller
         $visualClips = $clips
             ->filter(fn ($clip) => $clip->type !== 'audio')
             ->values();
+        $audioClips = $clips
+            ->filter(fn ($clip) => $clip->type === 'audio')
+            ->values();
 
         if ($visualClips->isEmpty()) {
             return back()->withErrors([
@@ -174,6 +179,8 @@ class ProjectController extends Controller
         $command = [$ffmpegPath, '-y'];
         $filters = [];
         $concatInputs = [];
+        $audioInputs = [];
+        $timelineEnd = (float) $clips->max(fn ($clip) => $clip->start + $clip->duration);
 
         foreach ($visualClips as $index => $clip) {
             $mediaPath = Storage::disk($clip->media->disk)->path($clip->media->path);
@@ -212,7 +219,42 @@ class ProjectController extends Controller
             $concatInputs[] = '[v'.$index.']';
         }
 
+        foreach ($audioClips as $index => $clip) {
+            $inputIndex = $visualClips->count() + $index;
+            $mediaPath = Storage::disk($clip->media->disk)->path($clip->media->path);
+            $audioLabel = 'a'.$index;
+            $delayMilliseconds = (int) round($clip->start * 1000);
+
+            array_push(
+                $command,
+                '-ss',
+                (string) $clip->source_start,
+                '-t',
+                (string) $clip->duration,
+                '-i',
+                $mediaPath,
+            );
+
+            // Each timeline audio clip is trimmed from its source, delayed to its timeline position, then mixed into one export track.
+            $filters[] = sprintf(
+                '[%d:a]asetpts=PTS-STARTPTS,adelay=%d:all=1[%s]',
+                $inputIndex,
+                $delayMilliseconds,
+                $audioLabel,
+            );
+            $audioInputs[] = '['.$audioLabel.']';
+        }
+
         $filters[] = implode('', $concatInputs).'concat=n='.$visualClips->count().':v=1:a=0[outv]';
+
+        if ($audioClips->isNotEmpty()) {
+            $filters[] = sprintf(
+                '%samix=inputs=%d:duration=longest:dropout_transition=0,atrim=0:%F,asetpts=PTS-STARTPTS[outa]',
+                implode('', $audioInputs),
+                $audioClips->count(),
+                $timelineEnd,
+            );
+        }
 
         array_push(
             $command,
@@ -220,7 +262,24 @@ class ProjectController extends Controller
             implode(';', $filters),
             '-map',
             '[outv]',
-            '-an',
+        );
+
+        if ($audioClips->isNotEmpty()) {
+            array_push(
+                $command,
+                '-map',
+                '[outa]',
+                '-c:a',
+                'aac',
+                '-b:a',
+                '192k',
+            );
+        } else {
+            $command[] = '-an';
+        }
+
+        array_push(
+            $command,
             '-c:v',
             'libx264',
             '-pix_fmt',
@@ -393,6 +452,7 @@ class ProjectController extends Controller
         $project = $request->user()->projects()->findOrFail($project->id);
 
         $validated = $request->validate([
+            'autoSave' => ['sometimes', 'boolean'],
             'clips' => ['array'],
             'clips.*.mediaId' => ['required', 'integer'],
             'clips.*.name' => ['required', 'string', 'max:255'],
@@ -406,37 +466,74 @@ class ProjectController extends Controller
             'clips.*.rotation' => ['sometimes', 'numeric', 'min:-180', 'max:180'],
         ]);
 
-        $mediaIds = $project->media()
-            ->whereIn('id', collect($validated['clips'] ?? [])->pluck('mediaId'))
+        $clips = collect($validated['clips'] ?? []);
+        $requestedMediaIds = $clips
+            ->pluck('mediaId')
+            ->map(fn (int|string $mediaId): int => (int) $mediaId)
+            ->unique()
+            ->values();
+
+        $projectMediaIds = $project->media()
+            ->whereIn('id', $requestedMediaIds)
             ->pluck('id')
-            ->all();
+            ->map(fn (int|string $mediaId): int => (int) $mediaId);
 
-        $project->timelineClips()->delete();
-
-        foreach ($validated['clips'] ?? [] as $index => $clip) {
-            if (! in_array($clip['mediaId'], $mediaIds)) {
-                continue;
-            }
-
-            $project->timelineClips()->create([
-                'project_media_id' => $clip['mediaId'],
-                'name' => $clip['name'],
-                'type' => $clip['type'],
-                'start' => $clip['start'],
-                'duration' => $clip['duration'],
-                'source_start' => $clip['sourceStart'],
-                'scale' => $clip['scale'] ?? 100,
-                'position_x' => $clip['positionX'] ?? 0,
-                'position_y' => $clip['positionY'] ?? 0,
-                'rotation' => $clip['rotation'] ?? 0,
-                'sort_order' => $index,
+        if ($requestedMediaIds->diff($projectMediaIds)->isNotEmpty()) {
+            throw ValidationException::withMessages([
+                'clips' => __('Timeline contains media that does not belong to this project.'),
             ]);
         }
 
-        Inertia::flash('toast', [
-            'type' => 'success',
-            'message' => __('Timeline saved.'),
-        ]);
+        $timelineTracks = $clips->values();
+
+        foreach ($timelineTracks as $clipIndex => $clip) {
+            $clipTrack = $clip['type'] === 'audio' ? 'audio' : 'video';
+            $clipStart = (float) $clip['start'];
+            $clipEnd = $clipStart + (float) $clip['duration'];
+
+            foreach ($timelineTracks->slice($clipIndex + 1) as $otherClip) {
+                $otherClipTrack = $otherClip['type'] === 'audio' ? 'audio' : 'video';
+                $otherClipStart = (float) $otherClip['start'];
+                $otherClipEnd = $otherClipStart + (float) $otherClip['duration'];
+
+                if (
+                    $clipTrack === $otherClipTrack &&
+                    $clipStart < $otherClipEnd &&
+                    $clipEnd > $otherClipStart
+                ) {
+                    throw ValidationException::withMessages([
+                        'clips' => __('Timeline clips cannot overlap on the same track.'),
+                    ]);
+                }
+            }
+        }
+
+        DB::transaction(function () use ($project, $clips): void {
+            $project->timelineClips()->delete();
+
+            foreach ($clips as $index => $clip) {
+                $project->timelineClips()->create([
+                    'project_media_id' => $clip['mediaId'],
+                    'name' => $clip['name'],
+                    'type' => $clip['type'],
+                    'start' => $clip['start'],
+                    'duration' => $clip['duration'],
+                    'source_start' => $clip['sourceStart'],
+                    'scale' => $clip['scale'] ?? 100,
+                    'position_x' => $clip['positionX'] ?? 0,
+                    'position_y' => $clip['positionY'] ?? 0,
+                    'rotation' => $clip['rotation'] ?? 0,
+                    'sort_order' => $index,
+                ]);
+            }
+        });
+
+        if (! ($validated['autoSave'] ?? false)) {
+            Inertia::flash('toast', [
+                'type' => 'success',
+                'message' => __('Timeline saved.'),
+            ]);
+        }
 
         return to_route('projects.edit', $project);
     }

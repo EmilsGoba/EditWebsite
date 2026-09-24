@@ -479,6 +479,109 @@ test('saving a project timeline replaces old clips', function () {
     ]);
 });
 
+test('timeline save rejects media from another project without changing existing clips', function () {
+    $user = User::factory()->create();
+    $project = Project::factory()->for($user)->create();
+    $otherProject = Project::factory()->for($user)->create();
+    $ownedMedia = $project->media()->create([
+        'type' => 'video',
+        'original_name' => 'owned-video.mp4',
+        'path' => 'projects/'.$project->id.'/media/owned-video.mp4',
+        'disk' => 'public',
+        'mime_type' => 'video/mp4',
+        'size' => 1024,
+    ]);
+    $otherMedia = $otherProject->media()->create([
+        'type' => 'video',
+        'original_name' => 'other-video.mp4',
+        'path' => 'projects/'.$otherProject->id.'/media/other-video.mp4',
+        'disk' => 'public',
+        'mime_type' => 'video/mp4',
+        'size' => 1024,
+    ]);
+    $oldClip = $project->timelineClips()->create([
+        'project_media_id' => $ownedMedia->id,
+        'type' => 'video',
+        'name' => 'old-video.mp4',
+        'start' => 0,
+        'duration' => 5,
+        'source_start' => 0,
+        'sort_order' => 0,
+    ]);
+
+    $this->actingAs($user)
+        ->put(route('projects.timeline.save', $project), [
+            'clips' => [
+                [
+                    'mediaId' => $otherMedia->id,
+                    'name' => 'other-video.mp4',
+                    'type' => 'video',
+                    'start' => 0,
+                    'duration' => 4,
+                    'sourceStart' => 0,
+                ],
+            ],
+        ])
+        ->assertSessionHasErrors('clips');
+
+    $this->assertDatabaseHas('project_timeline_clips', [
+        'id' => $oldClip->id,
+        'project_id' => $project->id,
+        'project_media_id' => $ownedMedia->id,
+        'name' => 'old-video.mp4',
+    ]);
+    $this->assertDatabaseMissing('project_timeline_clips', [
+        'project_id' => $project->id,
+        'project_media_id' => $otherMedia->id,
+    ]);
+});
+
+test('timeline save rejects overlapping clips on the same track', function () {
+    $user = User::factory()->create();
+    $project = Project::factory()->for($user)->create();
+    $firstMedia = $project->media()->create([
+        'type' => 'video',
+        'original_name' => 'first-video.mp4',
+        'path' => 'projects/'.$project->id.'/media/first-video.mp4',
+        'disk' => 'public',
+        'mime_type' => 'video/mp4',
+        'size' => 1024,
+    ]);
+    $secondMedia = $project->media()->create([
+        'type' => 'image',
+        'original_name' => 'cover.jpg',
+        'path' => 'projects/'.$project->id.'/media/cover.jpg',
+        'disk' => 'public',
+        'mime_type' => 'image/jpeg',
+        'size' => 1024,
+    ]);
+
+    $this->actingAs($user)
+        ->put(route('projects.timeline.save', $project), [
+            'clips' => [
+                [
+                    'mediaId' => $firstMedia->id,
+                    'name' => 'first-video.mp4',
+                    'type' => 'video',
+                    'start' => 0,
+                    'duration' => 5,
+                    'sourceStart' => 0,
+                ],
+                [
+                    'mediaId' => $secondMedia->id,
+                    'name' => 'cover.jpg',
+                    'type' => 'image',
+                    'start' => 4,
+                    'duration' => 5,
+                    'sourceStart' => 0,
+                ],
+            ],
+        ])
+        ->assertSessionHasErrors('clips');
+
+    expect(ProjectTimelineClip::count())->toBe(0);
+});
+
 test('users cannot save another users project timeline', function () {
     $user = User::factory()->create();
     $otherUser = User::factory()->create();
