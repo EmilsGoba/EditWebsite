@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\Project;
+use App\Models\ProjectTimelineClip;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -76,7 +77,11 @@ class ProjectController extends Controller
                     'positionX' => (float) $clip->position_x,
                     'positionY' => (float) $clip->position_y,
                     'rotation' => (float) $clip->rotation,
-                    'url' => Storage::disk($clip->media->disk)->url($clip->media->path),
+                    'previewWidth' => $clip->preview_width,
+                    'previewHeight' => $clip->preview_height,
+                    'url' => $clip->media
+                        ? Storage::disk($clip->media->disk)->url($clip->media->path)
+                        : null,
                 ]),
         ]);
     }
@@ -126,8 +131,12 @@ class ProjectController extends Controller
                     'positionX' => (float) $clip->position_x,
                     'positionY' => (float) $clip->position_y,
                     'rotation' => (float) $clip->rotation,
-                    'url' => Storage::disk($clip->media->disk)->url($clip->media->path),
-            ]),
+                    'previewWidth' => $clip->preview_width,
+                    'previewHeight' => $clip->preview_height,
+                    'url' => $clip->media
+                        ? Storage::disk($clip->media->disk)->url($clip->media->path)
+                        : null,
+                ]),
         ]);
     }
 
@@ -147,10 +156,13 @@ class ProjectController extends Controller
             ->orderBy('sort_order')
             ->get();
         $visualClips = $clips
-            ->filter(fn ($clip) => $clip->type !== 'audio')
+            ->filter(fn ($clip) => in_array($clip->type, ['video', 'image'], true))
             ->values();
         $audioClips = $clips
             ->filter(fn ($clip) => $clip->type === 'audio')
+            ->values();
+        $textClips = $clips
+            ->filter(fn ($clip) => $clip->type === 'text' && trim((string) $clip->name) !== '')
             ->values();
 
         if ($visualClips->isEmpty()) {
@@ -180,6 +192,7 @@ class ProjectController extends Controller
         $filters = [];
         $concatInputs = [];
         $audioInputs = [];
+        $textOverlayPaths = [];
         $timelineEnd = (float) $clips->max(fn ($clip) => $clip->start + $clip->duration);
 
         foreach ($visualClips as $index => $clip) {
@@ -245,7 +258,60 @@ class ProjectController extends Controller
             $audioInputs[] = '['.$audioLabel.']';
         }
 
-        $filters[] = implode('', $concatInputs).'concat=n='.$visualClips->count().':v=1:a=0[outv]';
+        foreach ($textClips as $index => $clip) {
+            $textExportScale = $this->textExportScale($project->format, $renderSize, $clip);
+            $fontSize = (int) round(18 * $textExportScale * ((float) $clip->scale / 100));
+            $textOverlayPath = $this->createTextOverlayImage(
+                (string) $clip->name,
+                max(12, min(180, $fontSize)),
+                $temporaryDirectory,
+                $index,
+            );
+
+            $textOverlayPaths[] = $textOverlayPath;
+
+            array_push(
+                $command,
+                '-loop',
+                '1',
+                '-t',
+                (string) $timelineEnd,
+                '-i',
+                $textOverlayPath,
+            );
+        }
+
+        $filters[] = implode('', $concatInputs).'concat=n='.$visualClips->count().':v=1:a=0[basev]';
+
+        $videoOutputLabel = 'basev';
+
+        foreach ($textClips as $index => $clip) {
+            $nextVideoOutputLabel = 'textv'.$index;
+            $textInputIndex = $visualClips->count() + $audioClips->count() + $index;
+            $textOverlayLabel = 'textoverlay'.$index;
+            $textExportScale = $this->textExportScale($project->format, $renderSize, $clip);
+            $positionX = (int) round((float) $clip->position_x * $textExportScale);
+            $positionY = (int) round((float) $clip->position_y * $textExportScale);
+
+            // Text clips are first rendered as transparent PNGs, then overlaid so the export works even without FFmpeg drawtext support.
+            $filters[] = sprintf('[%d:v]format=rgba[%s]', $textInputIndex, $textOverlayLabel);
+            $filters[] = sprintf(
+                '[%s][%s]overlay=x=\'max(0\,min(W-w\,(W-w)/2%+d))\':y=\'max(0\,min(H-h\,(H-h)/2%+d))\':enable=\'between(t,%F,%F)\'[%s]',
+                $videoOutputLabel,
+                $textOverlayLabel,
+                $positionX,
+                $positionY,
+                (float) $clip->start,
+                (float) ($clip->start + $clip->duration),
+                $nextVideoOutputLabel,
+            );
+
+            $videoOutputLabel = $nextVideoOutputLabel;
+        }
+
+        if ($videoOutputLabel !== 'outv') {
+            $filters[] = sprintf('[%s]null[outv]', $videoOutputLabel);
+        }
 
         if ($audioClips->isNotEmpty()) {
             $filters[] = sprintf(
@@ -292,6 +358,10 @@ class ProjectController extends Controller
         $process = new Process($command);
         $process->setTimeout(300);
         $process->run();
+
+        foreach ($textOverlayPaths as $textOverlayPath) {
+            @unlink($textOverlayPath);
+        }
 
         if (! $process->isSuccessful() || ! file_exists($outputPath)) {
             report(new \RuntimeException($process->getErrorOutput()));
@@ -454,20 +524,30 @@ class ProjectController extends Controller
         $validated = $request->validate([
             'autoSave' => ['sometimes', 'boolean'],
             'clips' => ['array'],
-            'clips.*.mediaId' => ['required', 'integer'],
+            'clips.*.mediaId' => ['nullable', 'integer'],
             'clips.*.name' => ['required', 'string', 'max:255'],
-            'clips.*.type' => ['required', Rule::in(['video', 'image', 'audio'])],
+            'clips.*.type' => ['required', Rule::in(['video', 'image', 'audio', 'text'])],
             'clips.*.start' => ['required', 'numeric', 'min:0', 'max:3600'],
             'clips.*.duration' => ['required', 'numeric', 'min:0.01', 'max:3600'],
             'clips.*.sourceStart' => ['required', 'numeric', 'min:0', 'max:3600'],
             'clips.*.scale' => ['sometimes', 'numeric', 'min:40', 'max:160'],
-            'clips.*.positionX' => ['sometimes', 'numeric', 'min:-100', 'max:100'],
-            'clips.*.positionY' => ['sometimes', 'numeric', 'min:-100', 'max:100'],
+            'clips.*.positionX' => ['sometimes', 'numeric', 'min:-2000', 'max:2000'],
+            'clips.*.positionY' => ['sometimes', 'numeric', 'min:-2000', 'max:2000'],
             'clips.*.rotation' => ['sometimes', 'numeric', 'min:-180', 'max:180'],
+            'clips.*.previewWidth' => ['nullable', 'integer', 'min:1', 'max:4000'],
+            'clips.*.previewHeight' => ['nullable', 'integer', 'min:1', 'max:4000'],
         ]);
 
         $clips = collect($validated['clips'] ?? []);
+
+        if ($clips->contains(fn (array $clip): bool => $clip['type'] !== 'text' && ! isset($clip['mediaId']))) {
+            throw ValidationException::withMessages([
+                'clips' => __('Timeline media clips must reference an uploaded media file.'),
+            ]);
+        }
+
         $requestedMediaIds = $clips
+            ->filter(fn (array $clip) => ($clip['type'] ?? null) !== 'text')
             ->pluck('mediaId')
             ->map(fn (int|string $mediaId): int => (int) $mediaId)
             ->unique()
@@ -487,12 +567,20 @@ class ProjectController extends Controller
         $timelineTracks = $clips->values();
 
         foreach ($timelineTracks as $clipIndex => $clip) {
-            $clipTrack = $clip['type'] === 'audio' ? 'audio' : 'video';
+            $clipTrack = match ($clip['type']) {
+                'audio' => 'audio',
+                'text' => 'text',
+                default => 'video',
+            };
             $clipStart = (float) $clip['start'];
             $clipEnd = $clipStart + (float) $clip['duration'];
 
             foreach ($timelineTracks->slice($clipIndex + 1) as $otherClip) {
-                $otherClipTrack = $otherClip['type'] === 'audio' ? 'audio' : 'video';
+                $otherClipTrack = match ($otherClip['type']) {
+                    'audio' => 'audio',
+                    'text' => 'text',
+                    default => 'video',
+                };
                 $otherClipStart = (float) $otherClip['start'];
                 $otherClipEnd = $otherClipStart + (float) $otherClip['duration'];
 
@@ -513,7 +601,7 @@ class ProjectController extends Controller
 
             foreach ($clips as $index => $clip) {
                 $project->timelineClips()->create([
-                    'project_media_id' => $clip['mediaId'],
+                    'project_media_id' => $clip['mediaId'] ?? null,
                     'name' => $clip['name'],
                     'type' => $clip['type'],
                     'start' => $clip['start'],
@@ -523,6 +611,8 @@ class ProjectController extends Controller
                     'position_x' => $clip['positionX'] ?? 0,
                     'position_y' => $clip['positionY'] ?? 0,
                     'rotation' => $clip['rotation'] ?? 0,
+                    'preview_width' => $clip['previewWidth'] ?? null,
+                    'preview_height' => $clip['previewHeight'] ?? null,
                     'sort_order' => $index,
                 ]);
             }
@@ -536,6 +626,95 @@ class ProjectController extends Controller
         }
 
         return to_route('projects.edit', $project);
+    }
+
+    /**
+     * Render a text clip to a transparent image that FFmpeg can overlay on the video.
+     */
+    private function createTextOverlayImage(string $text, int $fontSize, string $directory, int $index): string
+    {
+        $text = trim(str_replace(["\n", "\r"], ' ', $text));
+        $fontPath = $this->textRenderFontPath();
+        $padding = max(12, (int) round($fontSize * 0.35));
+
+        if ($fontPath !== null) {
+            $box = imagettfbbox($fontSize, 0, $fontPath, $text);
+            $minX = min($box[0], $box[2], $box[4], $box[6]);
+            $maxX = max($box[0], $box[2], $box[4], $box[6]);
+            $minY = min($box[1], $box[3], $box[5], $box[7]);
+            $maxY = max($box[1], $box[3], $box[5], $box[7]);
+            $width = max(1, $maxX - $minX + $padding * 2);
+            $height = max(1, $maxY - $minY + $padding * 2);
+            $textX = $padding - $minX;
+            $textY = $padding - $minY;
+        } else {
+            $width = max(1, imagefontwidth(5) * strlen($text) + $padding * 2);
+            $height = imagefontheight(5) + $padding * 2;
+            $textX = $padding;
+            $textY = $padding;
+        }
+
+        $image = imagecreatetruecolor($width, $height);
+        imagesavealpha($image, true);
+        imagefill($image, 0, 0, imagecolorallocatealpha($image, 0, 0, 0, 127));
+
+        $white = imagecolorallocate($image, 255, 255, 255);
+        $shadow = imagecolorallocatealpha($image, 0, 0, 0, 25);
+
+        if ($fontPath !== null) {
+            imagettftext($image, $fontSize, 0, $textX + 2, $textY + 2, $shadow, $fontPath, $text);
+            imagettftext($image, $fontSize, 0, $textX, $textY, $white, $fontPath, $text);
+        } else {
+            imagestring($image, 5, $textX + 2, $textY + 2, $text, $shadow);
+            imagestring($image, 5, $textX, $textY, $text, $white);
+        }
+
+        $path = $directory.'/text-overlay-'.now()->format('YmdHis').'-'.$index.'.png';
+        imagepng($image, $path);
+        imagedestroy($image);
+
+        return $path;
+    }
+
+    private function textRenderFontPath(): ?string
+    {
+        $fonts = [
+            '/System/Library/Fonts/Supplemental/Arial Bold.ttf',
+            '/System/Library/Fonts/Supplemental/Arial.ttf',
+            '/Library/Fonts/Arial.ttf',
+        ];
+
+        foreach ($fonts as $font) {
+            if (is_file($font)) {
+                return $font;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Convert editor-preview text pixels to export pixels.
+     */
+    private function textExportScale(string $format, array $renderSize, ProjectTimelineClip $clip): float
+    {
+        $previewSize = [
+            'width' => $clip->preview_width ?: null,
+            'height' => $clip->preview_height ?: null,
+        ];
+
+        if (! $previewSize['width'] || ! $previewSize['height']) {
+            $previewSize = match ($format) {
+                '9:16' => ['width' => 405, 'height' => 720],
+                '1:1' => ['width' => 540, 'height' => 540],
+                default => ['width' => 740, 'height' => 416],
+            };
+        }
+
+        return min(
+            $renderSize['width'] / $previewSize['width'],
+            $renderSize['height'] / $previewSize['height'],
+        );
     }
 
     /**

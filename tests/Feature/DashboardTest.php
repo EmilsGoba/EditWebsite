@@ -432,6 +432,123 @@ test('users can save their project timeline', function () {
     ]);
 });
 
+test('users can save timeline clips that start after the beginning', function () {
+    $user = User::factory()->create();
+    $project = Project::factory()->for($user)->create();
+    $media = $project->media()->create([
+        'type' => 'video',
+        'original_name' => 'delayed-video.mp4',
+        'path' => 'projects/'.$project->id.'/media/delayed-video.mp4',
+        'disk' => 'public',
+        'mime_type' => 'video/mp4',
+        'size' => 1024,
+    ]);
+
+    $this->actingAs($user)
+        ->put(route('projects.timeline.save', $project), [
+            'clips' => [
+                [
+                    'mediaId' => $media->id,
+                    'name' => 'delayed-video.mp4',
+                    'type' => 'video',
+                    'start' => 2.5,
+                    'duration' => 6,
+                    'sourceStart' => 0,
+                ],
+            ],
+        ])
+        ->assertSessionHasNoErrors();
+
+    $this->assertDatabaseHas('project_timeline_clips', [
+        'project_id' => $project->id,
+        'project_media_id' => $media->id,
+        'start' => 2.5,
+        'duration' => 6,
+    ]);
+});
+
+test('users can save text clips without uploaded media', function () {
+    $user = User::factory()->create();
+    $project = Project::factory()->for($user)->create();
+
+    $this->actingAs($user)
+        ->put(route('projects.timeline.save', $project), [
+            'clips' => [
+                [
+                    'mediaId' => null,
+                    'name' => 'Text',
+                    'type' => 'text',
+                    'start' => 1,
+                    'duration' => 12,
+                    'sourceStart' => 0,
+                ],
+            ],
+        ])
+        ->assertSessionHasNoErrors()
+        ->assertRedirect(route('projects.edit', $project));
+
+    $this->assertDatabaseHas('project_timeline_clips', [
+        'project_id' => $project->id,
+        'project_media_id' => null,
+        'name' => 'Text',
+        'type' => 'text',
+        'start' => 1,
+        'duration' => 12,
+    ]);
+});
+
+test('users can save text over video and custom text positions', function () {
+    $user = User::factory()->create();
+    $project = Project::factory()->for($user)->create();
+    $media = $project->media()->create([
+        'type' => 'video',
+        'original_name' => 'background-video.mp4',
+        'path' => 'projects/'.$project->id.'/media/background-video.mp4',
+        'disk' => 'public',
+        'mime_type' => 'video/mp4',
+        'size' => 1024,
+    ]);
+
+    $this->actingAs($user)
+        ->put(route('projects.timeline.save', $project), [
+            'clips' => [
+                [
+                    'mediaId' => $media->id,
+                    'name' => 'background-video.mp4',
+                    'type' => 'video',
+                    'start' => 1,
+                    'duration' => 8,
+                    'sourceStart' => 0,
+                ],
+                [
+                    'mediaId' => null,
+                    'name' => 'Custom text',
+                    'type' => 'text',
+                    'start' => 1,
+                    'duration' => 8,
+                    'sourceStart' => 0,
+                    'positionX' => 240,
+                    'positionY' => -180,
+                    'previewWidth' => 740,
+                    'previewHeight' => 416,
+                ],
+            ],
+        ])
+        ->assertSessionHasNoErrors();
+
+    $this->assertDatabaseHas('project_timeline_clips', [
+        'project_id' => $project->id,
+        'project_media_id' => null,
+        'name' => 'Custom text',
+        'type' => 'text',
+        'start' => 1,
+        'position_x' => 240,
+        'position_y' => -180,
+        'preview_width' => 740,
+        'preview_height' => 416,
+    ]);
+});
+
 test('saving a project timeline replaces old clips', function () {
     $user = User::factory()->create();
     $project = Project::factory()->for($user)->create();

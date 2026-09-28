@@ -14,11 +14,11 @@ import {
     Redo2,
     Save,
     Scissors,
+    Type,
     Trash2,
     Upload,
     Undo2,
     Volume2,
-    WandSparkles,
 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
@@ -47,11 +47,13 @@ type ProjectMedia = {
     created_at: string;
 };
 
+type TimelineClipType = ProjectMedia['type'] | 'text';
+
 type TimelineClip = {
     id: number;
-    mediaId: number;
+    mediaId: number | null;
     name: string;
-    type: ProjectMedia['type'];
+    type: TimelineClipType;
     start: number;
     duration: number;
     sourceStart: number;
@@ -59,8 +61,10 @@ type TimelineClip = {
     positionX: number;
     positionY: number;
     rotation: number;
+    previewWidth?: number | null;
+    previewHeight?: number | null;
     color: string;
-    url: string;
+    url: string | null;
 };
 
 type SavedTimelineClip = Omit<
@@ -84,13 +88,15 @@ type PlayheadDragState = {
 };
 
 type TimelineDropPreview = {
-    track: 'video' | 'audio';
+    track: TimelineTrack;
     name: string;
-    type: ProjectMedia['type'];
+    type: TimelineClipType;
     start: number;
     duration: number;
     canPlace: boolean;
 };
+
+type TimelineTrack = 'video' | 'audio' | 'text';
 
 type TimelineClipMovePreview = {
     clipId: number;
@@ -100,7 +106,15 @@ type TimelineClipMovePreview = {
     offsetPixels: number;
 };
 
-const effectItems = ['Fade in', 'Blur', 'Color boost', 'Black and white'];
+type TextPreviewDragState = {
+    clipId: number;
+    startClientX: number;
+    startClientY: number;
+    startPositionX: number;
+    startPositionY: number;
+    startingClips: TimelineClip[];
+};
+
 const uploadLimits =
     'Allowed files: MP4, MOV, JPG, JPEG, PNG, MP3. Videos up to 500 MB, images up to 10 MB, audio up to 50 MB.';
 const acceptedMediaTypes = '.mp4,.mov,.jpg,.jpeg,.png,.mp3';
@@ -115,6 +129,7 @@ const visibleTimelineIntervalSeconds = 0.1;
 const timelineOverlapGapSeconds = timelineFrameDurationSeconds;
 const mediaDragType = 'application/x-video-editor-media';
 const clipDragType = 'application/x-video-editor-clip';
+const textDragType = 'application/x-video-editor-text';
 const defaultClipProperties = {
     scale: 100,
     positionX: 0,
@@ -122,7 +137,11 @@ const defaultClipProperties = {
     rotation: 0,
 };
 
-function getTemporaryClipDuration(type: ProjectMedia['type']) {
+function getTemporaryClipDuration(type: TimelineClipType) {
+    if (type === 'text') {
+        return 5;
+    }
+
     if (type === 'image') {
         return 5;
     }
@@ -134,7 +153,11 @@ function getTemporaryClipDuration(type: ProjectMedia['type']) {
     return 10;
 }
 
-function getTimelineColor(type: ProjectMedia['type']) {
+function getTimelineColor(type: TimelineClipType) {
+    if (type === 'text') {
+        return 'bg-violet-600';
+    }
+
     if (type === 'audio') {
         return 'bg-emerald-700/80';
     }
@@ -153,9 +176,11 @@ export default function Editor({
 }: EditorProps) {
     const fileInputRef = useRef<HTMLInputElement>(null);
     const previewVideoRef = useRef<HTMLVideoElement>(null);
+    const previewFrameRef = useRef<HTMLDivElement>(null);
     const timelineAudioRef = useRef<HTMLAudioElement>(null);
     const timelineScrollRef = useRef<HTMLDivElement>(null);
     const latestTrimClipsRef = useRef<TimelineClip[] | null>(null);
+    const latestTextPreviewDragClipsRef = useRef<TimelineClip[] | null>(null);
     const autoSaveTimerRef = useRef<number | null>(null);
     const hasAutoSaveMountedRef = useRef(false);
     const activeSaveRequestRef = useRef(0);
@@ -207,6 +232,8 @@ export default function Editor({
         useState<TimelineDropPreview | null>(null);
     const [timelineClipMovePreview, setTimelineClipMovePreview] =
         useState<TimelineClipMovePreview | null>(null);
+    const [textPreviewDragState, setTextPreviewDragState] =
+        useState<TextPreviewDragState | null>(null);
     const latestTimelineClipsRef = useRef<TimelineClip[]>(initialTimelineClips);
     const latestTimelineSignatureRef = useRef(
         getTimelineSaveSignature(initialTimelineClips),
@@ -282,7 +309,7 @@ export default function Editor({
     const activeClip = useMemo(() => {
         return timelineClips.find(
             (clip) =>
-                clip.type !== 'audio' &&
+                (clip.type === 'video' || clip.type === 'image') &&
                 playhead >= clip.start &&
                 playhead < clip.start + clip.duration,
         );
@@ -296,12 +323,25 @@ export default function Editor({
                 playhead < clip.start + clip.duration,
         );
     }, [playhead, timelineClips]);
+    const activeTextClips = useMemo(() => {
+        return timelineClips.filter(
+            (clip) =>
+                clip.type === 'text' &&
+                playhead >= clip.start &&
+                playhead < clip.start + clip.duration,
+        );
+    }, [playhead, timelineClips]);
 
     const selectedClip = useMemo(() => {
         return timelineClips.find((clip) => clip.id === selectedClipId) ?? null;
     }, [selectedClipId, timelineClips]);
     const selectedVisualClip =
-        selectedClip && selectedClip.type !== 'audio' ? selectedClip : null;
+        selectedClip &&
+        (selectedClip.type === 'video' || selectedClip.type === 'image')
+            ? selectedClip
+            : null;
+    const selectedTextClip =
+        selectedClip && selectedClip.type === 'text' ? selectedClip : null;
     const selectedClipScale =
         selectedVisualClip?.scale ?? defaultClipProperties.scale;
     const selectedClipPositionX =
@@ -629,6 +669,55 @@ export default function Editor({
         };
     }, [playheadDragState]);
 
+    useEffect(() => {
+        if (!textPreviewDragState) {
+            return;
+        }
+
+        const currentDragState = textPreviewDragState;
+
+        function dragTextPreview(event: MouseEvent) {
+            const nextPositionX =
+                currentDragState.startPositionX +
+                event.clientX -
+                currentDragState.startClientX;
+            const nextPositionY =
+                currentDragState.startPositionY +
+                event.clientY -
+                currentDragState.startClientY;
+            const nextClips = currentDragState.startingClips.map((clip) =>
+                clip.id === currentDragState.clipId
+                    ? {
+                          ...clip,
+                          positionX: Math.round(nextPositionX),
+                          positionY: Math.round(nextPositionY),
+                      }
+                    : clip,
+            );
+
+            latestTextPreviewDragClipsRef.current = nextClips;
+            setTimelineClips(nextClips);
+            setSaveStatus('unsaved');
+        }
+
+        function stopDraggingTextPreview() {
+            if (latestTextPreviewDragClipsRef.current) {
+                saveTimelineChange(latestTextPreviewDragClipsRef.current);
+            }
+
+            latestTextPreviewDragClipsRef.current = null;
+            setTextPreviewDragState(null);
+        }
+
+        window.addEventListener('mousemove', dragTextPreview);
+        window.addEventListener('mouseup', stopDraggingTextPreview);
+
+        return () => {
+            window.removeEventListener('mousemove', dragTextPreview);
+            window.removeEventListener('mouseup', stopDraggingTextPreview);
+        };
+    }, [textPreviewDragState, history, historyIndex]);
+
     function getMediaIcon(type: ProjectMedia['type']) {
         if (type === 'image') {
             return Image;
@@ -731,6 +820,14 @@ export default function Editor({
     }
 
     function getTimelineSavePayload(clips: TimelineClip[], autoSave = false) {
+        const previewBounds = previewFrameRef.current?.getBoundingClientRect();
+        const previewWidth = previewBounds
+            ? Math.round(previewBounds.width)
+            : null;
+        const previewHeight = previewBounds
+            ? Math.round(previewBounds.height)
+            : null;
+
         return {
             autoSave,
             clips: clips.map((clip) => ({
@@ -744,6 +841,14 @@ export default function Editor({
                 positionX: clip.positionX,
                 positionY: clip.positionY,
                 rotation: clip.rotation,
+                previewWidth:
+                    clip.type === 'text'
+                        ? (previewWidth ?? clip.previewWidth ?? null)
+                        : clip.previewWidth,
+                previewHeight:
+                    clip.type === 'text'
+                        ? (previewHeight ?? clip.previewHeight ?? null)
+                        : clip.previewHeight,
             })),
         };
     }
@@ -833,12 +938,47 @@ export default function Editor({
         return nextClips;
     }
 
+    function createTextClip(start: number): TimelineClip {
+        return {
+            id: Date.now(),
+            mediaId: null,
+            name: 'Text',
+            type: 'text',
+            start,
+            duration: getTemporaryClipDuration('text'),
+            sourceStart: 0,
+            ...defaultClipProperties,
+            color: getTimelineColor('text'),
+            url: null,
+        };
+    }
+
     function getMediaTimelineDuration(item: ProjectMedia) {
         return mediaDurations[item.id] ?? getTemporaryClipDuration(item.type);
     }
 
-    function getClipTrack(clip: Pick<TimelineClip, 'type'>) {
-        return clip.type === 'audio' ? 'audio' : 'video';
+    function addTextToTimelineAt(start: number) {
+        const nextClip = createTextClip(snapToTimelineStep(Math.max(0, start)));
+
+        if (!canPlaceTimelineClips([nextClip])) {
+            return;
+        }
+
+        saveTimelineChange([...timelineClips, nextClip]);
+        setSelectedClipId(nextClip.id);
+        setIsPlaying(false);
+    }
+
+    function getClipTrack(clip: Pick<TimelineClip, 'type'>): TimelineTrack {
+        if (clip.type === 'audio') {
+            return 'audio';
+        }
+
+        if (clip.type === 'text') {
+            return 'text';
+        }
+
+        return 'video';
     }
 
     function timelineClipOverlaps(
@@ -1032,14 +1172,25 @@ export default function Editor({
     }
 
     function getOriginalClipDuration(clip: TimelineClip) {
+        if (clip.type === 'text') {
+            return Number.POSITIVE_INFINITY;
+        }
+
         // Metadata gives the true source duration after the browser has loaded it. Existing saved clips use their current source span as a safe fallback.
         return Math.max(
-            mediaDurations[clip.mediaId] ?? getTemporaryClipDuration(clip.type),
+            clip.mediaId
+                ? (mediaDurations[clip.mediaId] ??
+                      getTemporaryClipDuration(clip.type))
+                : getTemporaryClipDuration(clip.type),
             clip.sourceStart + clip.duration,
         );
     }
 
     function getLinkedClipIds(clipToMatch: TimelineClip) {
+        if (clipToMatch.type === 'text') {
+            return [clipToMatch.id];
+        }
+
         return timelineClips
             .filter(
                 (clip) =>
@@ -1220,15 +1371,24 @@ export default function Editor({
         return pixelsToSeconds(event.clientX - bounds.left - offsetPixels);
     }
 
-    function canPlaceOnTrack(
-        type: ProjectMedia['type'],
-        track: 'video' | 'audio',
-    ) {
+    function canPlaceOnTrack(type: TimelineClipType, track: TimelineTrack) {
+        if (track === 'text') {
+            return type === 'text';
+        }
+
         if (track === 'audio') {
             return type === 'audio';
         }
 
-        return type !== 'audio';
+        return type === 'video' || type === 'image';
+    }
+
+    function startTextDrag(event: React.DragEvent<HTMLButtonElement>) {
+        event.dataTransfer.effectAllowed = 'copy';
+        event.dataTransfer.setData(textDragType, 'text');
+        setTimelineDropPreview(null);
+
+        hideBrowserDragImage(event);
     }
 
     function startMediaDrag(
@@ -1304,8 +1464,32 @@ export default function Editor({
 
     function allowTimelineDrop(
         event: React.DragEvent<HTMLDivElement>,
-        track: 'video' | 'audio',
+        track: TimelineTrack,
     ) {
+        if (event.dataTransfer.types.includes(textDragType)) {
+            if (!canPlaceOnTrack('text', track)) {
+                setTimelineDropPreview(null);
+                return;
+            }
+
+            const previewStart = snapToTimelineStep(
+                getTimelineDropStart(event),
+            );
+            const previewClip = createTextClip(previewStart);
+
+            event.preventDefault();
+            event.dataTransfer.dropEffect = 'copy';
+            setTimelineDropPreview({
+                track,
+                name: previewClip.name,
+                type: previewClip.type,
+                start: previewStart,
+                duration: previewClip.duration,
+                canPlace: canPlaceTimelineClips([previewClip]),
+            });
+            return;
+        }
+
         if (event.dataTransfer.types.includes(mediaDragType)) {
             if (!draggingMedia || !canPlaceOnTrack(draggingMedia.type, track)) {
                 setTimelineDropPreview(null);
@@ -1373,9 +1557,18 @@ export default function Editor({
 
     function dropOnTimeline(
         event: React.DragEvent<HTMLDivElement>,
-        track: 'video' | 'audio',
+        track: TimelineTrack,
     ) {
         event.preventDefault();
+
+        if (event.dataTransfer.getData(textDragType)) {
+            if (canPlaceOnTrack('text', track)) {
+                addTextToTimelineAt(getTimelineDropStart(event));
+            }
+
+            setTimelineDropPreview(null);
+            return;
+        }
 
         const draggedMediaId = Number(
             event.dataTransfer.getData(mediaDragType),
@@ -1586,6 +1779,82 @@ export default function Editor({
         );
     }
 
+    function updateSelectedTextClipName(name: string) {
+        if (!selectedTextClip) {
+            return;
+        }
+
+        // Text clips store their visible text in the clip name, so saving the timeline also saves this text.
+        saveTimelineChange(
+            timelineClips.map((clip) =>
+                clip.id === selectedTextClip.id
+                    ? {
+                          ...clip,
+                          name,
+                      }
+                    : clip,
+            ),
+        );
+    }
+
+    function updateSelectedTextClipProperty(
+        property: keyof typeof defaultClipProperties,
+        value: number,
+    ) {
+        if (!selectedTextClip) {
+            return;
+        }
+
+        // Text clips reuse the same transform fields as video clips, which keeps saving simple.
+        saveTimelineChange(
+            timelineClips.map((clip) =>
+                clip.id === selectedTextClip.id
+                    ? {
+                          ...clip,
+                          [property]: value,
+                      }
+                    : clip,
+            ),
+        );
+    }
+
+    function resetTextControls() {
+        if (!selectedTextClip) {
+            return;
+        }
+
+        saveTimelineChange(
+            timelineClips.map((clip) =>
+                clip.id === selectedTextClip.id
+                    ? {
+                          ...clip,
+                          ...defaultClipProperties,
+                      }
+                    : clip,
+            ),
+        );
+    }
+
+    function startTextPreviewDrag(
+        event: React.MouseEvent<HTMLButtonElement>,
+        clip: TimelineClip,
+    ) {
+        event.preventDefault();
+        event.stopPropagation();
+        setSelectedClipId(clip.id);
+        setIsPlaying(false);
+
+        // Dragging text in the preview changes that text clip's saved position.
+        setTextPreviewDragState({
+            clipId: clip.id,
+            startClientX: event.clientX,
+            startClientY: event.clientY,
+            startPositionX: clip.positionX,
+            startPositionY: clip.positionY,
+            startingClips: timelineClips,
+        });
+    }
+
     function openMediaPicker() {
         fileInputRef.current?.click();
     }
@@ -1666,7 +1935,9 @@ export default function Editor({
                 // Keep the temporary editor state in sync after media deletion removes its timeline clips.
                 saveTimelineChange(
                     timelineClips.filter(
-                        (clip) => !mediaIdsToDelete.includes(clip.mediaId),
+                        (clip) =>
+                            !clip.mediaId ||
+                            !mediaIdsToDelete.includes(clip.mediaId),
                     ),
                 );
                 setIsDeletingMedia(false);
@@ -1755,7 +2026,7 @@ export default function Editor({
                     ref={timelineAudioRef}
                     onEnded={finishCurrentTimelineAudio}
                     preload="metadata"
-                    src={activeAudioClip.url}
+                    src={activeAudioClip.url ?? ''}
                 />
             )}
 
@@ -2065,30 +2336,32 @@ export default function Editor({
 
                             <section className="border-t border-zinc-800 p-4">
                                 <div className="mb-4 flex items-center gap-2">
-                                    <WandSparkles className="size-4 text-cyan-400" />
+                                    <Type className="size-4 text-cyan-400" />
                                     <div>
                                         <h2 className="text-sm font-semibold text-white">
-                                            Effects Pool
+                                            Text
                                         </h2>
                                         <p className="text-xs text-zinc-500">
-                                            Temporary effects
+                                            Temporary text tools
                                         </p>
                                     </div>
                                 </div>
 
                                 <div className="space-y-2">
-                                    {effectItems.map((effect) => (
-                                        <button
-                                            className="flex w-full items-center justify-between rounded border border-zinc-800 bg-zinc-950 px-3 py-2 text-left text-sm text-zinc-300 transition hover:border-cyan-500 hover:text-white"
-                                            key={effect}
-                                            type="button"
-                                        >
-                                            <span>{effect}</span>
-                                            <span className="text-xs text-zinc-600">
-                                                FX
-                                            </span>
-                                        </button>
-                                    ))}
+                                    <button
+                                        className="flex w-full items-center justify-between rounded border border-zinc-800 bg-zinc-950 px-3 py-2 text-left text-sm text-zinc-300 transition hover:border-cyan-500 hover:text-white"
+                                        draggable
+                                        onDragEnd={() =>
+                                            setTimelineDropPreview(null)
+                                        }
+                                        onDragStart={startTextDrag}
+                                        type="button"
+                                    >
+                                        <span>Text</span>
+                                        <span className="text-xs text-zinc-600">
+                                            TXT
+                                        </span>
+                                    </button>
                                 </div>
                             </section>
                         </aside>
@@ -2096,6 +2369,7 @@ export default function Editor({
                         <section className="flex items-center justify-center border-b border-zinc-800 bg-zinc-950 p-5 lg:border-r">
                             <div className="flex aspect-video w-full items-center justify-center overflow-hidden rounded bg-black shadow-2xl">
                                 <div
+                                    ref={previewFrameRef}
                                     className={`${previewFrame.className} relative max-h-[92%] max-w-[92%] overflow-hidden rounded-sm border border-cyan-400/30 bg-zinc-900/80 shadow-[0_0_0_9999px_rgba(0,0,0,0.2)]`}
                                     style={{
                                         aspectRatio: previewFrame.aspectRatio,
@@ -2118,7 +2392,7 @@ export default function Editor({
                                             <img
                                                 alt={activeClip.name}
                                                 className="size-full object-cover"
-                                                src={activeClip.url}
+                                                src={activeClip.url ?? ''}
                                             />
                                         ) : activeClip?.type === 'video' ? (
                                             <video
@@ -2133,7 +2407,7 @@ export default function Editor({
                                                 }
                                                 playsInline
                                                 preload="metadata"
-                                                src={activeClip.url}
+                                                src={activeClip.url ?? ''}
                                             >
                                                 <track kind="captions" />
                                             </video>
@@ -2155,6 +2429,29 @@ export default function Editor({
                                             </div>
                                         )}
                                     </div>
+                                    {activeTextClips.map((clip, index) => (
+                                        <button
+                                            className={`absolute left-1/2 cursor-move text-center text-lg font-semibold text-white drop-shadow-[0_2px_8px_rgba(0,0,0,0.85)] ${
+                                                selectedClipId === clip.id
+                                                    ? 'rounded outline outline-1 outline-cyan-300/70'
+                                                    : ''
+                                            }`}
+                                            key={clip.id}
+                                            onMouseDown={(event) =>
+                                                startTextPreviewDrag(
+                                                    event,
+                                                    clip,
+                                                )
+                                            }
+                                            style={{
+                                                top: `${50 + index * 12}%`,
+                                                transform: `translate(-50%, -50%) translate(${clip.positionX}px, ${clip.positionY}px) rotate(${clip.rotation}deg) scale(${clip.scale / 100})`,
+                                            }}
+                                            type="button"
+                                        >
+                                            {clip.name || 'Text'}
+                                        </button>
+                                    ))}
                                 </div>
                             </div>
                         </section>
@@ -2163,247 +2460,523 @@ export default function Editor({
                             <div className="flex items-start justify-between gap-3">
                                 <div>
                                     <h2 className="text-sm font-semibold text-white">
-                                        Resize
+                                        {selectedTextClip ? 'Text' : 'Resize'}
                                     </h2>
                                     <p className="mt-1 text-xs text-zinc-500">
-                                        {selectedVisualClip
-                                            ? selectedVisualClip.name
-                                            : 'Select a video or image clip'}
+                                        {selectedTextClip
+                                            ? 'Text clip settings'
+                                            : selectedVisualClip
+                                              ? selectedVisualClip.name
+                                              : 'Select a video, image, or text clip'}
                                     </p>
                                 </div>
-                                <Button
-                                    className="h-8 gap-2 border-zinc-700 bg-zinc-950 px-3 text-xs text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
-                                    disabled={!selectedVisualClip}
-                                    onClick={resetResizeControls}
-                                    type="button"
-                                    variant="outline"
-                                >
-                                    <RotateCcw className="size-3.5" />
-                                    Reset
-                                </Button>
+                                {selectedTextClip ? (
+                                    <Button
+                                        className="h-8 gap-2 border-zinc-700 bg-zinc-950 px-3 text-xs text-zinc-200 hover:bg-zinc-800"
+                                        onClick={resetTextControls}
+                                        type="button"
+                                        variant="outline"
+                                    >
+                                        <RotateCcw className="size-3.5" />
+                                        Reset
+                                    </Button>
+                                ) : (
+                                    <Button
+                                        className="h-8 gap-2 border-zinc-700 bg-zinc-950 px-3 text-xs text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+                                        disabled={!selectedVisualClip}
+                                        onClick={resetResizeControls}
+                                        type="button"
+                                        variant="outline"
+                                    >
+                                        <RotateCcw className="size-3.5" />
+                                        Reset
+                                    </Button>
+                                )}
                             </div>
 
-                            <div className="mt-4 space-y-4">
-                                <label className="block text-xs text-zinc-400">
-                                    <span className="flex items-center justify-between gap-3">
-                                        Scale
-                                        <span className="flex items-center gap-1">
-                                            <input
-                                                className="h-8 w-20 rounded border border-zinc-700 bg-zinc-950 px-2 font-mono text-xs text-zinc-100 outline-none focus:border-cyan-500 disabled:opacity-50"
-                                                disabled={!selectedVisualClip}
-                                                max="160"
-                                                min="40"
-                                                onChange={(event) =>
-                                                    updateSelectedClipProperty(
-                                                        'scale',
-                                                        Number(
-                                                            event.target.value,
-                                                        ),
-                                                    )
-                                                }
-                                                type="number"
-                                                value={selectedClipScale}
-                                            />
-                                            <span className="text-zinc-500">
-                                                %
-                                            </span>
-                                            <button
-                                                className="ml-1 flex size-8 items-center justify-center rounded border border-zinc-700 bg-zinc-950 text-zinc-400 transition hover:border-cyan-500 hover:text-white disabled:opacity-50"
-                                                disabled={!selectedVisualClip}
-                                                onClick={() =>
-                                                    updateSelectedClipProperty(
-                                                        'scale',
-                                                        100,
-                                                    )
-                                                }
-                                                title="Reset scale"
-                                                type="button"
-                                            >
-                                                <RotateCcw className="size-3.5" />
-                                            </button>
-                                        </span>
-                                    </span>
-                                    <input
-                                        className="mt-2 w-full accent-cyan-500 disabled:opacity-50"
-                                        disabled={!selectedVisualClip}
-                                        max="160"
-                                        min="40"
-                                        onChange={(event) =>
-                                            updateSelectedClipProperty(
-                                                'scale',
-                                                Number(event.target.value),
-                                            )
-                                        }
-                                        type="range"
-                                        value={selectedClipScale}
-                                    />
-                                </label>
+                            {selectedTextClip ? (
+                                <div className="mt-4 space-y-4">
+                                    <label className="block text-xs text-zinc-400">
+                                        Text content
+                                        <textarea
+                                            className="mt-2 min-h-28 w-full resize-none rounded border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 transition outline-none focus:border-cyan-500"
+                                            onChange={(event) =>
+                                                updateSelectedTextClipName(
+                                                    event.target.value,
+                                                )
+                                            }
+                                            placeholder="Write your text..."
+                                            value={selectedTextClip.name}
+                                        />
+                                    </label>
 
-                                <label className="block text-xs text-zinc-400">
-                                    <span className="flex items-center justify-between gap-3">
-                                        Position X
-                                        <span className="flex items-center gap-1">
-                                            <input
-                                                className="h-8 w-20 rounded border border-zinc-700 bg-zinc-950 px-2 font-mono text-xs text-zinc-100 outline-none focus:border-cyan-500 disabled:opacity-50"
-                                                disabled={!selectedVisualClip}
-                                                max="100"
-                                                min="-100"
-                                                onChange={(event) =>
-                                                    updateSelectedClipProperty(
-                                                        'positionX',
-                                                        Number(
-                                                            event.target.value,
-                                                        ),
-                                                    )
-                                                }
-                                                type="number"
-                                                value={selectedClipPositionX}
-                                            />
-                                            <span className="text-zinc-500">
-                                                px
+                                    <label className="block text-xs text-zinc-400">
+                                        <span className="flex items-center justify-between gap-3">
+                                            Size
+                                            <span className="flex items-center gap-1">
+                                                <input
+                                                    className="h-8 w-20 rounded border border-zinc-700 bg-zinc-950 px-2 font-mono text-xs text-zinc-100 outline-none focus:border-cyan-500"
+                                                    max="160"
+                                                    min="40"
+                                                    onChange={(event) =>
+                                                        updateSelectedTextClipProperty(
+                                                            'scale',
+                                                            Number(
+                                                                event.target
+                                                                    .value,
+                                                            ),
+                                                        )
+                                                    }
+                                                    type="number"
+                                                    value={
+                                                        selectedTextClip.scale
+                                                    }
+                                                />
+                                                <span className="text-zinc-500">
+                                                    %
+                                                </span>
+                                                <button
+                                                    className="ml-1 flex size-8 items-center justify-center rounded border border-zinc-700 bg-zinc-950 text-zinc-400 transition hover:border-cyan-500 hover:text-white"
+                                                    onClick={() =>
+                                                        updateSelectedTextClipProperty(
+                                                            'scale',
+                                                            100,
+                                                        )
+                                                    }
+                                                    title="Reset size"
+                                                    type="button"
+                                                >
+                                                    <RotateCcw className="size-3.5" />
+                                                </button>
                                             </span>
-                                            <button
-                                                className="ml-1 flex size-8 items-center justify-center rounded border border-zinc-700 bg-zinc-950 text-zinc-400 transition hover:border-cyan-500 hover:text-white disabled:opacity-50"
-                                                disabled={!selectedVisualClip}
-                                                onClick={() =>
-                                                    updateSelectedClipProperty(
-                                                        'positionX',
-                                                        0,
-                                                    )
-                                                }
-                                                title="Reset position X"
-                                                type="button"
-                                            >
-                                                <RotateCcw className="size-3.5" />
-                                            </button>
                                         </span>
-                                    </span>
-                                    <input
-                                        className="mt-2 w-full accent-cyan-500 disabled:opacity-50"
-                                        disabled={!selectedVisualClip}
-                                        max="100"
-                                        min="-100"
-                                        onChange={(event) =>
-                                            updateSelectedClipProperty(
-                                                'positionX',
-                                                Number(event.target.value),
-                                            )
-                                        }
-                                        type="range"
-                                        value={selectedClipPositionX}
-                                    />
-                                </label>
+                                        <input
+                                            className="mt-2 w-full accent-cyan-500"
+                                            max="160"
+                                            min="40"
+                                            onChange={(event) =>
+                                                updateSelectedTextClipProperty(
+                                                    'scale',
+                                                    Number(event.target.value),
+                                                )
+                                            }
+                                            type="range"
+                                            value={selectedTextClip.scale}
+                                        />
+                                    </label>
 
-                                <label className="block text-xs text-zinc-400">
-                                    <span className="flex items-center justify-between gap-3">
-                                        Position Y
-                                        <span className="flex items-center gap-1">
-                                            <input
-                                                className="h-8 w-20 rounded border border-zinc-700 bg-zinc-950 px-2 font-mono text-xs text-zinc-100 outline-none focus:border-cyan-500 disabled:opacity-50"
-                                                disabled={!selectedVisualClip}
-                                                max="100"
-                                                min="-100"
-                                                onChange={(event) =>
-                                                    updateSelectedClipProperty(
-                                                        'positionY',
-                                                        Number(
-                                                            event.target.value,
-                                                        ),
-                                                    )
-                                                }
-                                                type="number"
-                                                value={selectedClipPositionY}
-                                            />
-                                            <span className="text-zinc-500">
-                                                px
+                                    <label className="block text-xs text-zinc-400">
+                                        <span className="flex items-center justify-between gap-3">
+                                            Position X
+                                            <span className="flex items-center gap-1">
+                                                <input
+                                                    className="h-8 w-20 rounded border border-zinc-700 bg-zinc-950 px-2 font-mono text-xs text-zinc-100 outline-none focus:border-cyan-500"
+                                                    max="1000"
+                                                    min="-1000"
+                                                    onChange={(event) =>
+                                                        updateSelectedTextClipProperty(
+                                                            'positionX',
+                                                            Number(
+                                                                event.target
+                                                                    .value,
+                                                            ),
+                                                        )
+                                                    }
+                                                    type="number"
+                                                    value={
+                                                        selectedTextClip.positionX
+                                                    }
+                                                />
+                                                <span className="text-zinc-500">
+                                                    px
+                                                </span>
+                                                <button
+                                                    className="ml-1 flex size-8 items-center justify-center rounded border border-zinc-700 bg-zinc-950 text-zinc-400 transition hover:border-cyan-500 hover:text-white"
+                                                    onClick={() =>
+                                                        updateSelectedTextClipProperty(
+                                                            'positionX',
+                                                            0,
+                                                        )
+                                                    }
+                                                    title="Reset position X"
+                                                    type="button"
+                                                >
+                                                    <RotateCcw className="size-3.5" />
+                                                </button>
                                             </span>
-                                            <button
-                                                className="ml-1 flex size-8 items-center justify-center rounded border border-zinc-700 bg-zinc-950 text-zinc-400 transition hover:border-cyan-500 hover:text-white disabled:opacity-50"
-                                                disabled={!selectedVisualClip}
-                                                onClick={() =>
-                                                    updateSelectedClipProperty(
-                                                        'positionY',
-                                                        0,
-                                                    )
-                                                }
-                                                title="Reset position Y"
-                                                type="button"
-                                            >
-                                                <RotateCcw className="size-3.5" />
-                                            </button>
                                         </span>
-                                    </span>
-                                    <input
-                                        className="mt-2 w-full accent-cyan-500 disabled:opacity-50"
-                                        disabled={!selectedVisualClip}
-                                        max="100"
-                                        min="-100"
-                                        onChange={(event) =>
-                                            updateSelectedClipProperty(
-                                                'positionY',
-                                                Number(event.target.value),
-                                            )
-                                        }
-                                        type="range"
-                                        value={selectedClipPositionY}
-                                    />
-                                </label>
+                                        <input
+                                            className="mt-2 w-full accent-cyan-500"
+                                            max="1000"
+                                            min="-1000"
+                                            onChange={(event) =>
+                                                updateSelectedTextClipProperty(
+                                                    'positionX',
+                                                    Number(event.target.value),
+                                                )
+                                            }
+                                            type="range"
+                                            value={selectedTextClip.positionX}
+                                        />
+                                    </label>
 
-                                <label className="block text-xs text-zinc-400">
-                                    <span className="flex items-center justify-between gap-3">
-                                        Rotation
-                                        <span className="flex items-center gap-1">
-                                            <input
-                                                className="h-8 w-20 rounded border border-zinc-700 bg-zinc-950 px-2 font-mono text-xs text-zinc-100 outline-none focus:border-cyan-500 disabled:opacity-50"
-                                                disabled={!selectedVisualClip}
-                                                max="180"
-                                                min="-180"
-                                                onChange={(event) =>
-                                                    updateSelectedClipProperty(
-                                                        'rotation',
-                                                        Number(
-                                                            event.target.value,
-                                                        ),
-                                                    )
-                                                }
-                                                type="number"
-                                                value={selectedClipRotation}
-                                            />
-                                            <span className="text-zinc-500">
-                                                deg
+                                    <label className="block text-xs text-zinc-400">
+                                        <span className="flex items-center justify-between gap-3">
+                                            Position Y
+                                            <span className="flex items-center gap-1">
+                                                <input
+                                                    className="h-8 w-20 rounded border border-zinc-700 bg-zinc-950 px-2 font-mono text-xs text-zinc-100 outline-none focus:border-cyan-500"
+                                                    max="1000"
+                                                    min="-1000"
+                                                    onChange={(event) =>
+                                                        updateSelectedTextClipProperty(
+                                                            'positionY',
+                                                            Number(
+                                                                event.target
+                                                                    .value,
+                                                            ),
+                                                        )
+                                                    }
+                                                    type="number"
+                                                    value={
+                                                        selectedTextClip.positionY
+                                                    }
+                                                />
+                                                <span className="text-zinc-500">
+                                                    px
+                                                </span>
+                                                <button
+                                                    className="ml-1 flex size-8 items-center justify-center rounded border border-zinc-700 bg-zinc-950 text-zinc-400 transition hover:border-cyan-500 hover:text-white"
+                                                    onClick={() =>
+                                                        updateSelectedTextClipProperty(
+                                                            'positionY',
+                                                            0,
+                                                        )
+                                                    }
+                                                    title="Reset position Y"
+                                                    type="button"
+                                                >
+                                                    <RotateCcw className="size-3.5" />
+                                                </button>
                                             </span>
-                                            <button
-                                                className="ml-1 flex size-8 items-center justify-center rounded border border-zinc-700 bg-zinc-950 text-zinc-400 transition hover:border-cyan-500 hover:text-white disabled:opacity-50"
-                                                disabled={!selectedVisualClip}
-                                                onClick={() =>
-                                                    updateSelectedClipProperty(
-                                                        'rotation',
-                                                        0,
-                                                    )
-                                                }
-                                                title="Reset rotation"
-                                                type="button"
-                                            >
-                                                <RotateCcw className="size-3.5" />
-                                            </button>
                                         </span>
-                                    </span>
-                                    <input
-                                        className="mt-2 w-full accent-cyan-500 disabled:opacity-50"
-                                        disabled={!selectedVisualClip}
-                                        max="180"
-                                        min="-180"
-                                        onChange={(event) =>
-                                            updateSelectedClipProperty(
-                                                'rotation',
-                                                Number(event.target.value),
-                                            )
-                                        }
-                                        type="range"
-                                        value={selectedClipRotation}
-                                    />
-                                </label>
-                            </div>
+                                        <input
+                                            className="mt-2 w-full accent-cyan-500"
+                                            max="1000"
+                                            min="-1000"
+                                            onChange={(event) =>
+                                                updateSelectedTextClipProperty(
+                                                    'positionY',
+                                                    Number(event.target.value),
+                                                )
+                                            }
+                                            type="range"
+                                            value={selectedTextClip.positionY}
+                                        />
+                                    </label>
+
+                                    <label className="block text-xs text-zinc-400">
+                                        <span className="flex items-center justify-between gap-3">
+                                            Rotation
+                                            <span className="flex items-center gap-1">
+                                                <input
+                                                    className="h-8 w-20 rounded border border-zinc-700 bg-zinc-950 px-2 font-mono text-xs text-zinc-100 outline-none focus:border-cyan-500"
+                                                    max="180"
+                                                    min="-180"
+                                                    onChange={(event) =>
+                                                        updateSelectedTextClipProperty(
+                                                            'rotation',
+                                                            Number(
+                                                                event.target
+                                                                    .value,
+                                                            ),
+                                                        )
+                                                    }
+                                                    type="number"
+                                                    value={
+                                                        selectedTextClip.rotation
+                                                    }
+                                                />
+                                                <span className="text-zinc-500">
+                                                    deg
+                                                </span>
+                                                <button
+                                                    className="ml-1 flex size-8 items-center justify-center rounded border border-zinc-700 bg-zinc-950 text-zinc-400 transition hover:border-cyan-500 hover:text-white"
+                                                    onClick={() =>
+                                                        updateSelectedTextClipProperty(
+                                                            'rotation',
+                                                            0,
+                                                        )
+                                                    }
+                                                    title="Reset rotation"
+                                                    type="button"
+                                                >
+                                                    <RotateCcw className="size-3.5" />
+                                                </button>
+                                            </span>
+                                        </span>
+                                        <input
+                                            className="mt-2 w-full accent-cyan-500"
+                                            max="180"
+                                            min="-180"
+                                            onChange={(event) =>
+                                                updateSelectedTextClipProperty(
+                                                    'rotation',
+                                                    Number(event.target.value),
+                                                )
+                                            }
+                                            type="range"
+                                            value={selectedTextClip.rotation}
+                                        />
+                                    </label>
+                                </div>
+                            ) : (
+                                <div className="mt-4 space-y-4">
+                                    <label className="block text-xs text-zinc-400">
+                                        <span className="flex items-center justify-between gap-3">
+                                            Scale
+                                            <span className="flex items-center gap-1">
+                                                <input
+                                                    className="h-8 w-20 rounded border border-zinc-700 bg-zinc-950 px-2 font-mono text-xs text-zinc-100 outline-none focus:border-cyan-500 disabled:opacity-50"
+                                                    disabled={
+                                                        !selectedVisualClip
+                                                    }
+                                                    max="160"
+                                                    min="40"
+                                                    onChange={(event) =>
+                                                        updateSelectedClipProperty(
+                                                            'scale',
+                                                            Number(
+                                                                event.target
+                                                                    .value,
+                                                            ),
+                                                        )
+                                                    }
+                                                    type="number"
+                                                    value={selectedClipScale}
+                                                />
+                                                <span className="text-zinc-500">
+                                                    %
+                                                </span>
+                                                <button
+                                                    className="ml-1 flex size-8 items-center justify-center rounded border border-zinc-700 bg-zinc-950 text-zinc-400 transition hover:border-cyan-500 hover:text-white disabled:opacity-50"
+                                                    disabled={
+                                                        !selectedVisualClip
+                                                    }
+                                                    onClick={() =>
+                                                        updateSelectedClipProperty(
+                                                            'scale',
+                                                            100,
+                                                        )
+                                                    }
+                                                    title="Reset scale"
+                                                    type="button"
+                                                >
+                                                    <RotateCcw className="size-3.5" />
+                                                </button>
+                                            </span>
+                                        </span>
+                                        <input
+                                            className="mt-2 w-full accent-cyan-500 disabled:opacity-50"
+                                            disabled={!selectedVisualClip}
+                                            max="160"
+                                            min="40"
+                                            onChange={(event) =>
+                                                updateSelectedClipProperty(
+                                                    'scale',
+                                                    Number(event.target.value),
+                                                )
+                                            }
+                                            type="range"
+                                            value={selectedClipScale}
+                                        />
+                                    </label>
+
+                                    <label className="block text-xs text-zinc-400">
+                                        <span className="flex items-center justify-between gap-3">
+                                            Position X
+                                            <span className="flex items-center gap-1">
+                                                <input
+                                                    className="h-8 w-20 rounded border border-zinc-700 bg-zinc-950 px-2 font-mono text-xs text-zinc-100 outline-none focus:border-cyan-500 disabled:opacity-50"
+                                                    disabled={
+                                                        !selectedVisualClip
+                                                    }
+                                                    max="100"
+                                                    min="-100"
+                                                    onChange={(event) =>
+                                                        updateSelectedClipProperty(
+                                                            'positionX',
+                                                            Number(
+                                                                event.target
+                                                                    .value,
+                                                            ),
+                                                        )
+                                                    }
+                                                    type="number"
+                                                    value={
+                                                        selectedClipPositionX
+                                                    }
+                                                />
+                                                <span className="text-zinc-500">
+                                                    px
+                                                </span>
+                                                <button
+                                                    className="ml-1 flex size-8 items-center justify-center rounded border border-zinc-700 bg-zinc-950 text-zinc-400 transition hover:border-cyan-500 hover:text-white disabled:opacity-50"
+                                                    disabled={
+                                                        !selectedVisualClip
+                                                    }
+                                                    onClick={() =>
+                                                        updateSelectedClipProperty(
+                                                            'positionX',
+                                                            0,
+                                                        )
+                                                    }
+                                                    title="Reset position X"
+                                                    type="button"
+                                                >
+                                                    <RotateCcw className="size-3.5" />
+                                                </button>
+                                            </span>
+                                        </span>
+                                        <input
+                                            className="mt-2 w-full accent-cyan-500 disabled:opacity-50"
+                                            disabled={!selectedVisualClip}
+                                            max="100"
+                                            min="-100"
+                                            onChange={(event) =>
+                                                updateSelectedClipProperty(
+                                                    'positionX',
+                                                    Number(event.target.value),
+                                                )
+                                            }
+                                            type="range"
+                                            value={selectedClipPositionX}
+                                        />
+                                    </label>
+
+                                    <label className="block text-xs text-zinc-400">
+                                        <span className="flex items-center justify-between gap-3">
+                                            Position Y
+                                            <span className="flex items-center gap-1">
+                                                <input
+                                                    className="h-8 w-20 rounded border border-zinc-700 bg-zinc-950 px-2 font-mono text-xs text-zinc-100 outline-none focus:border-cyan-500 disabled:opacity-50"
+                                                    disabled={
+                                                        !selectedVisualClip
+                                                    }
+                                                    max="100"
+                                                    min="-100"
+                                                    onChange={(event) =>
+                                                        updateSelectedClipProperty(
+                                                            'positionY',
+                                                            Number(
+                                                                event.target
+                                                                    .value,
+                                                            ),
+                                                        )
+                                                    }
+                                                    type="number"
+                                                    value={
+                                                        selectedClipPositionY
+                                                    }
+                                                />
+                                                <span className="text-zinc-500">
+                                                    px
+                                                </span>
+                                                <button
+                                                    className="ml-1 flex size-8 items-center justify-center rounded border border-zinc-700 bg-zinc-950 text-zinc-400 transition hover:border-cyan-500 hover:text-white disabled:opacity-50"
+                                                    disabled={
+                                                        !selectedVisualClip
+                                                    }
+                                                    onClick={() =>
+                                                        updateSelectedClipProperty(
+                                                            'positionY',
+                                                            0,
+                                                        )
+                                                    }
+                                                    title="Reset position Y"
+                                                    type="button"
+                                                >
+                                                    <RotateCcw className="size-3.5" />
+                                                </button>
+                                            </span>
+                                        </span>
+                                        <input
+                                            className="mt-2 w-full accent-cyan-500 disabled:opacity-50"
+                                            disabled={!selectedVisualClip}
+                                            max="100"
+                                            min="-100"
+                                            onChange={(event) =>
+                                                updateSelectedClipProperty(
+                                                    'positionY',
+                                                    Number(event.target.value),
+                                                )
+                                            }
+                                            type="range"
+                                            value={selectedClipPositionY}
+                                        />
+                                    </label>
+
+                                    <label className="block text-xs text-zinc-400">
+                                        <span className="flex items-center justify-between gap-3">
+                                            Rotation
+                                            <span className="flex items-center gap-1">
+                                                <input
+                                                    className="h-8 w-20 rounded border border-zinc-700 bg-zinc-950 px-2 font-mono text-xs text-zinc-100 outline-none focus:border-cyan-500 disabled:opacity-50"
+                                                    disabled={
+                                                        !selectedVisualClip
+                                                    }
+                                                    max="180"
+                                                    min="-180"
+                                                    onChange={(event) =>
+                                                        updateSelectedClipProperty(
+                                                            'rotation',
+                                                            Number(
+                                                                event.target
+                                                                    .value,
+                                                            ),
+                                                        )
+                                                    }
+                                                    type="number"
+                                                    value={selectedClipRotation}
+                                                />
+                                                <span className="text-zinc-500">
+                                                    deg
+                                                </span>
+                                                <button
+                                                    className="ml-1 flex size-8 items-center justify-center rounded border border-zinc-700 bg-zinc-950 text-zinc-400 transition hover:border-cyan-500 hover:text-white disabled:opacity-50"
+                                                    disabled={
+                                                        !selectedVisualClip
+                                                    }
+                                                    onClick={() =>
+                                                        updateSelectedClipProperty(
+                                                            'rotation',
+                                                            0,
+                                                        )
+                                                    }
+                                                    title="Reset rotation"
+                                                    type="button"
+                                                >
+                                                    <RotateCcw className="size-3.5" />
+                                                </button>
+                                            </span>
+                                        </span>
+                                        <input
+                                            className="mt-2 w-full accent-cyan-500 disabled:opacity-50"
+                                            disabled={!selectedVisualClip}
+                                            max="180"
+                                            min="-180"
+                                            onChange={(event) =>
+                                                updateSelectedClipProperty(
+                                                    'rotation',
+                                                    Number(event.target.value),
+                                                )
+                                            }
+                                            type="range"
+                                            value={selectedClipRotation}
+                                        />
+                                    </label>
+                                </div>
+                            )}
                         </aside>
 
                         <section className="bg-zinc-900 lg:col-span-2">
@@ -2670,7 +3243,8 @@ export default function Editor({
                                             {timelineClips
                                                 .filter(
                                                     (clip) =>
-                                                        clip.type !== 'audio',
+                                                        clip.type === 'video' ||
+                                                        clip.type === 'image',
                                                 )
                                                 .map((clip) => (
                                                     <button
@@ -2771,10 +3345,160 @@ export default function Editor({
                                                 </div>
                                             )}
                                             {timelineClips.filter(
-                                                (clip) => clip.type !== 'audio',
+                                                (clip) =>
+                                                    clip.type === 'video' ||
+                                                    clip.type === 'image',
                                             ).length === 0 && (
                                                 <div className="flex h-14 items-center justify-center rounded border border-dashed border-zinc-800 text-xs text-zinc-600">
                                                     Drag video or images here
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+
+                                    <div className="grid grid-cols-[92px_1fr] border-t border-zinc-800">
+                                        <div className="border-r border-zinc-800 p-3 text-xs text-zinc-500">
+                                            Text
+                                        </div>
+                                        <div
+                                            data-timeline-track
+                                            className="relative min-h-16 p-3"
+                                            onDragLeave={leaveTimelineDrop}
+                                            onDragOver={(event) =>
+                                                allowTimelineDrop(event, 'text')
+                                            }
+                                            onDrop={(event) =>
+                                                dropOnTimeline(event, 'text')
+                                            }
+                                        >
+                                            <div
+                                                className="absolute top-0 bottom-0 z-20 w-px bg-red-500"
+                                                style={{
+                                                    left: secondsToPixels(
+                                                        playhead,
+                                                    ),
+                                                }}
+                                            />
+                                            {getTimelineDragMarkerStart() !==
+                                                null && (
+                                                <div
+                                                    className="pointer-events-none absolute top-0 bottom-0 z-30 w-px bg-red-400"
+                                                    style={{
+                                                        left: secondsToPixels(
+                                                            getTimelineDragMarkerStart() ??
+                                                                0,
+                                                        ),
+                                                    }}
+                                                />
+                                            )}
+                                            {timelineClips
+                                                .filter(
+                                                    (clip) =>
+                                                        clip.type === 'text',
+                                                )
+                                                .map((clip) => (
+                                                    <button
+                                                        className={`${clip.color} absolute top-3 flex h-9 cursor-grab items-center overflow-hidden rounded px-3 text-left text-sm font-medium text-white active:cursor-grabbing ${
+                                                            selectedClipId ===
+                                                            clip.id
+                                                                ? 'ring-2 ring-cyan-300'
+                                                                : ''
+                                                        }`}
+                                                        draggable
+                                                        key={clip.id}
+                                                        onClick={(event) => {
+                                                            event.stopPropagation();
+                                                            selectTimelineClip(
+                                                                clip,
+                                                            );
+                                                        }}
+                                                        onDragStart={(event) =>
+                                                            startTimelineClipDrag(
+                                                                event,
+                                                                clip,
+                                                            )
+                                                        }
+                                                        onDragEnd={
+                                                            stopTimelineClipDrag
+                                                        }
+                                                        style={{
+                                                            left: secondsToPixels(
+                                                                getTimelineClipPreviewStart(
+                                                                    clip,
+                                                                ),
+                                                            ),
+                                                            width: Math.max(
+                                                                secondsToPixels(
+                                                                    clip.duration,
+                                                                ),
+                                                                24,
+                                                            ),
+                                                        }}
+                                                        type="button"
+                                                    >
+                                                        <span
+                                                            data-resize-handle
+                                                            className="absolute top-0 bottom-0 left-0 z-10 w-2 cursor-ew-resize bg-white/10 transition hover:bg-white/35"
+                                                            onMouseDown={(
+                                                                event,
+                                                            ) =>
+                                                                startClipTrim(
+                                                                    event,
+                                                                    clip,
+                                                                    'left',
+                                                                )
+                                                            }
+                                                        />
+                                                        <span className="truncate">
+                                                            {clip.name}
+                                                        </span>
+                                                        <span
+                                                            data-resize-handle
+                                                            className="absolute top-0 right-0 bottom-0 z-10 w-2 cursor-ew-resize bg-white/10 transition hover:bg-white/35"
+                                                            onMouseDown={(
+                                                                event,
+                                                            ) =>
+                                                                startClipTrim(
+                                                                    event,
+                                                                    clip,
+                                                                    'right',
+                                                                )
+                                                            }
+                                                        />
+                                                    </button>
+                                                ))}
+                                            {timelineDropPreview?.track ===
+                                                'text' && (
+                                                <div
+                                                    className={`pointer-events-none absolute top-3 z-10 flex h-9 items-center overflow-hidden rounded border px-3 text-left text-sm font-medium text-white opacity-45 ${
+                                                        timelineDropPreview.canPlace
+                                                            ? 'border-white/35 bg-violet-600'
+                                                            : 'border-red-200 bg-red-500/80'
+                                                    }`}
+                                                    style={{
+                                                        left: secondsToPixels(
+                                                            timelineDropPreview.start,
+                                                        ),
+                                                        width: Math.max(
+                                                            secondsToPixels(
+                                                                timelineDropPreview.duration,
+                                                            ),
+                                                            24,
+                                                        ),
+                                                    }}
+                                                >
+                                                    <span className="truncate">
+                                                        {
+                                                            timelineDropPreview.name
+                                                        }
+                                                    </span>
+                                                </div>
+                                            )}
+                                            {timelineClips.filter(
+                                                (clip) => clip.type === 'text',
+                                            ).length === 0 && (
+                                                <div className="flex h-9 items-center justify-center rounded border border-dashed border-zinc-800 text-xs text-zinc-600">
+                                                    Drag text here
                                                 </div>
                                             )}
                                         </div>

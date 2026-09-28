@@ -10,7 +10,7 @@ use Illuminate\Support\Carbon;
 /**
  * @property int $id
  * @property int $project_id
- * @property int $project_media_id
+ * @property int|null $project_media_id
  * @property string $name
  * @property string $type
  * @property string $start
@@ -20,6 +20,8 @@ use Illuminate\Support\Carbon;
  * @property string $position_x
  * @property string $position_y
  * @property string $rotation
+ * @property int|null $preview_width
+ * @property int|null $preview_height
  * @property int $sort_order
  * @property Carbon|null $created_at
  * @property Carbon|null $updated_at
@@ -35,6 +37,8 @@ use Illuminate\Support\Carbon;
     'position_x',
     'position_y',
     'rotation',
+    'preview_width',
+    'preview_height',
     'sort_order',
 ])]
 class ProjectTimelineClip extends Model
