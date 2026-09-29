@@ -220,13 +220,32 @@ class ProjectController extends Controller
                 );
             }
 
+            $clipExportScale = $this->previewExportScale($project->format, $renderSize, $clip);
+            $scaledWidth = (int) round($renderSize['width'] * ((float) $clip->scale / 100));
+            $scaledHeight = (int) round($renderSize['height'] * ((float) $clip->scale / 100));
+            $positionX = (int) round((float) $clip->position_x * $clipExportScale);
+            $positionY = (int) round((float) $clip->position_y * $clipExportScale);
+
             $filters[] = sprintf(
-                '[%d:v]scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,fps=30,setsar=1,format=yuv420p[v%d]',
+                '[%d:v]scale=%d:%d:force_original_aspect_ratio=decrease,fps=30,setsar=1,format=rgba[clip%dscaled]',
                 $index,
+                $this->evenDimension($scaledWidth),
+                $this->evenDimension($scaledHeight),
+                $index,
+            );
+            $filters[] = sprintf(
+                'color=c=black:s=%dx%d:d=%F:r=30[clip%dcanvas]',
                 $renderSize['width'],
                 $renderSize['height'],
-                $renderSize['width'],
-                $renderSize['height'],
+                (float) $clip->duration,
+                $index,
+            );
+            $filters[] = sprintf(
+                '[clip%dcanvas][clip%dscaled]overlay=x=\'(W-w)/2%+d\':y=\'(H-h)/2%+d\':shortest=1,format=yuv420p[v%d]',
+                $index,
+                $index,
+                $positionX,
+                $positionY,
                 $index,
             );
             $concatInputs[] = '[v'.$index.']';
@@ -259,7 +278,7 @@ class ProjectController extends Controller
         }
 
         foreach ($textClips as $index => $clip) {
-            $textExportScale = $this->textExportScale($project->format, $renderSize, $clip);
+            $textExportScale = $this->previewExportScale($project->format, $renderSize, $clip);
             $fontSize = (int) round(18 * $textExportScale * ((float) $clip->scale / 100));
             $textOverlayPath = $this->createTextOverlayImage(
                 (string) $clip->name,
@@ -289,7 +308,7 @@ class ProjectController extends Controller
             $nextVideoOutputLabel = 'textv'.$index;
             $textInputIndex = $visualClips->count() + $audioClips->count() + $index;
             $textOverlayLabel = 'textoverlay'.$index;
-            $textExportScale = $this->textExportScale($project->format, $renderSize, $clip);
+            $textExportScale = $this->previewExportScale($project->format, $renderSize, $clip);
             $positionX = (int) round((float) $clip->position_x * $textExportScale);
             $positionY = (int) round((float) $clip->position_y * $textExportScale);
 
@@ -530,7 +549,7 @@ class ProjectController extends Controller
             'clips.*.start' => ['required', 'numeric', 'min:0', 'max:3600'],
             'clips.*.duration' => ['required', 'numeric', 'min:0.01', 'max:3600'],
             'clips.*.sourceStart' => ['required', 'numeric', 'min:0', 'max:3600'],
-            'clips.*.scale' => ['sometimes', 'numeric', 'min:40', 'max:160'],
+            'clips.*.scale' => ['sometimes', 'numeric', 'min:40', 'max:1000'],
             'clips.*.positionX' => ['sometimes', 'numeric', 'min:-2000', 'max:2000'],
             'clips.*.positionY' => ['sometimes', 'numeric', 'min:-2000', 'max:2000'],
             'clips.*.rotation' => ['sometimes', 'numeric', 'min:-180', 'max:180'],
@@ -694,9 +713,9 @@ class ProjectController extends Controller
     }
 
     /**
-     * Convert editor-preview text pixels to export pixels.
+     * Convert editor-preview pixels to export pixels for text and visual clip transforms.
      */
-    private function textExportScale(string $format, array $renderSize, ProjectTimelineClip $clip): float
+    private function previewExportScale(string $format, array $renderSize, ProjectTimelineClip $clip): float
     {
         $previewSize = [
             'width' => $clip->preview_width ?: null,
@@ -715,6 +734,13 @@ class ProjectController extends Controller
             $renderSize['width'] / $previewSize['width'],
             $renderSize['height'] / $previewSize['height'],
         );
+    }
+
+    private function evenDimension(int $value): int
+    {
+        $value = max(2, $value);
+
+        return $value % 2 === 0 ? $value : $value + 1;
     }
 
     /**

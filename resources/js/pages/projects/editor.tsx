@@ -67,6 +67,11 @@ type TimelineClip = {
     url: string | null;
 };
 
+type MediaDimensions = {
+    width: number;
+    height: number;
+};
+
 type SavedTimelineClip = Omit<
     TimelineClip,
     'color' | 'positionX' | 'positionY' | 'rotation' | 'scale'
@@ -115,6 +120,26 @@ type TextPreviewDragState = {
     startingClips: TimelineClip[];
 };
 
+type VisualPreviewDragState = {
+    action: 'move' | 'scale';
+    clipId: number;
+    startClientX: number;
+    startClientY: number;
+    startPositionX: number;
+    startPositionY: number;
+    startScale: number;
+    startRotation: number;
+    mediaBounds: PreviewMediaBounds | null;
+    startingClips: TimelineClip[];
+};
+
+type PreviewMediaBounds = {
+    width: number;
+    height: number;
+    left: number;
+    top: number;
+};
+
 const uploadLimits =
     'Allowed files: MP4, MOV, JPG, JPEG, PNG, MP3. Videos up to 500 MB, images up to 10 MB, audio up to 50 MB.';
 const acceptedMediaTypes = '.mp4,.mov,.jpg,.jpeg,.png,.mp3';
@@ -127,6 +152,7 @@ const timelineFrameDurationSeconds = 1 / timelineFramesPerSecond;
 const timelinePlaybackIntervalMs = 1000 / timelineFramesPerSecond;
 const visibleTimelineIntervalSeconds = 0.1;
 const timelineOverlapGapSeconds = timelineFrameDurationSeconds;
+const maxClipScale = 1000;
 const mediaDragType = 'application/x-video-editor-media';
 const clipDragType = 'application/x-video-editor-clip';
 const textDragType = 'application/x-video-editor-text';
@@ -177,10 +203,14 @@ export default function Editor({
     const fileInputRef = useRef<HTMLInputElement>(null);
     const previewVideoRef = useRef<HTMLVideoElement>(null);
     const previewFrameRef = useRef<HTMLDivElement>(null);
+    const visualPreviewClipRef = useRef<HTMLDivElement>(null);
+    const visualPreviewBoxRef = useRef<HTMLDivElement>(null);
+    const visualPreviewBoxInnerRef = useRef<HTMLDivElement>(null);
     const timelineAudioRef = useRef<HTMLAudioElement>(null);
     const timelineScrollRef = useRef<HTMLDivElement>(null);
     const latestTrimClipsRef = useRef<TimelineClip[] | null>(null);
     const latestTextPreviewDragClipsRef = useRef<TimelineClip[] | null>(null);
+    const latestVisualPreviewDragClipsRef = useRef<TimelineClip[] | null>(null);
     const autoSaveTimerRef = useRef<number | null>(null);
     const hasAutoSaveMountedRef = useRef(false);
     const activeSaveRequestRef = useRef(0);
@@ -191,6 +221,9 @@ export default function Editor({
     const [selectedMediaIds, setSelectedMediaIds] = useState<number[]>([]);
     const [mediaDurations, setMediaDurations] = useState<
         Record<number, number>
+    >({});
+    const [mediaDimensions, setMediaDimensions] = useState<
+        Record<number, MediaDimensions>
     >({});
     const initialTimelineClips = useMemo(
         () =>
@@ -234,6 +267,8 @@ export default function Editor({
         useState<TimelineClipMovePreview | null>(null);
     const [textPreviewDragState, setTextPreviewDragState] =
         useState<TextPreviewDragState | null>(null);
+    const [visualPreviewDragState, setVisualPreviewDragState] =
+        useState<VisualPreviewDragState | null>(null);
     const latestTimelineClipsRef = useRef<TimelineClip[]>(initialTimelineClips);
     const latestTimelineSignatureRef = useRef(
         getTimelineSaveSignature(initialTimelineClips),
@@ -350,6 +385,11 @@ export default function Editor({
         selectedVisualClip?.positionY ?? defaultClipProperties.positionY;
     const selectedClipRotation =
         selectedVisualClip?.rotation ?? defaultClipProperties.rotation;
+    const activeClipMediaBounds = getContainedMediaBounds(activeClip);
+    const activeClipBoxBounds =
+        activeClipMediaBounds && activeClip
+            ? getScaledMediaBounds(activeClipMediaBounds, activeClip.scale)
+            : null;
 
     const timelineMarks = useMemo(
         () =>
@@ -718,6 +758,109 @@ export default function Editor({
         };
     }, [textPreviewDragState, history, historyIndex]);
 
+    useEffect(() => {
+        if (!visualPreviewDragState) {
+            return;
+        }
+
+        const currentDragState = visualPreviewDragState;
+
+        function dragVisualPreview(event: MouseEvent) {
+            let nextPositionX = currentDragState.startPositionX;
+            let nextPositionY = currentDragState.startPositionY;
+            let nextScale = currentDragState.startScale;
+
+            if (currentDragState.action === 'scale') {
+                const dragDistance =
+                    event.clientX -
+                    currentDragState.startClientX +
+                    (event.clientY - currentDragState.startClientY);
+
+                nextScale = Math.min(
+                    maxClipScale,
+                    Math.max(
+                        40,
+                        Math.round(
+                            currentDragState.startScale + dragDistance * 0.35,
+                        ),
+                    ),
+                );
+            } else {
+                nextPositionX = Math.round(
+                    currentDragState.startPositionX +
+                        event.clientX -
+                        currentDragState.startClientX,
+                );
+                nextPositionY = Math.round(
+                    currentDragState.startPositionY +
+                        event.clientY -
+                        currentDragState.startClientY,
+                );
+            }
+
+            const nextClips = currentDragState.startingClips.map((clip) => {
+                if (clip.id !== currentDragState.clipId) {
+                    return clip;
+                }
+
+                if (currentDragState.action === 'scale') {
+                    return {
+                        ...clip,
+                        scale: nextScale,
+                    };
+                }
+
+                return {
+                    ...clip,
+                    positionX: nextPositionX,
+                    positionY: nextPositionY,
+                };
+            });
+
+            if (visualPreviewClipRef.current) {
+                visualPreviewClipRef.current.style.transform = `translate(${nextPositionX}px, ${nextPositionY}px) rotate(${currentDragState.startRotation}deg) scale(${nextScale / 100})`;
+            }
+
+            if (visualPreviewBoxRef.current) {
+                visualPreviewBoxRef.current.style.transform = `translate(${nextPositionX}px, ${nextPositionY}px) rotate(${currentDragState.startRotation}deg)`;
+            }
+
+            if (
+                visualPreviewBoxInnerRef.current &&
+                currentDragState.mediaBounds
+            ) {
+                const nextBounds = getScaledMediaBounds(
+                    currentDragState.mediaBounds,
+                    nextScale,
+                );
+
+                visualPreviewBoxInnerRef.current.style.left = `${nextBounds.left}px`;
+                visualPreviewBoxInnerRef.current.style.top = `${nextBounds.top}px`;
+                visualPreviewBoxInnerRef.current.style.width = `${nextBounds.width}px`;
+                visualPreviewBoxInnerRef.current.style.height = `${nextBounds.height}px`;
+            }
+
+            latestVisualPreviewDragClipsRef.current = nextClips;
+        }
+
+        function stopDraggingVisualPreview() {
+            if (latestVisualPreviewDragClipsRef.current) {
+                saveTimelineChange(latestVisualPreviewDragClipsRef.current);
+            }
+
+            latestVisualPreviewDragClipsRef.current = null;
+            setVisualPreviewDragState(null);
+        }
+
+        window.addEventListener('mousemove', dragVisualPreview);
+        window.addEventListener('mouseup', stopDraggingVisualPreview);
+
+        return () => {
+            window.removeEventListener('mousemove', dragVisualPreview);
+            window.removeEventListener('mouseup', stopDraggingVisualPreview);
+        };
+    }, [visualPreviewDragState, history, historyIndex]);
+
     function getMediaIcon(type: ProjectMedia['type']) {
         if (type === 'image') {
             return Image;
@@ -842,11 +985,15 @@ export default function Editor({
                 positionY: clip.positionY,
                 rotation: clip.rotation,
                 previewWidth:
-                    clip.type === 'text'
+                    clip.type === 'text' ||
+                    clip.type === 'video' ||
+                    clip.type === 'image'
                         ? (previewWidth ?? clip.previewWidth ?? null)
                         : clip.previewWidth,
                 previewHeight:
-                    clip.type === 'text'
+                    clip.type === 'text' ||
+                    clip.type === 'video' ||
+                    clip.type === 'image'
                         ? (previewHeight ?? clip.previewHeight ?? null)
                         : clip.previewHeight,
             })),
@@ -901,6 +1048,73 @@ export default function Editor({
             ...currentDurations,
             [mediaId]: snapToTimelineStep(duration),
         }));
+    }
+
+    function rememberMediaDimensions(
+        mediaId: number | null,
+        width: number,
+        height: number,
+    ) {
+        if (
+            !mediaId ||
+            !Number.isFinite(width) ||
+            !Number.isFinite(height) ||
+            width <= 0 ||
+            height <= 0
+        ) {
+            return;
+        }
+
+        setMediaDimensions((currentDimensions) => ({
+            ...currentDimensions,
+            [mediaId]: {
+                width,
+                height,
+            },
+        }));
+    }
+
+    function getContainedMediaBounds(clip: TimelineClip | null | undefined) {
+        if (!clip?.mediaId) {
+            return null;
+        }
+
+        const dimensions = mediaDimensions[clip.mediaId];
+        const previewBounds = previewFrameRef.current?.getBoundingClientRect();
+
+        if (!dimensions || !previewBounds) {
+            return null;
+        }
+
+        const scale = Math.min(
+            previewBounds.width / dimensions.width,
+            previewBounds.height / dimensions.height,
+        );
+        const width = dimensions.width * scale;
+        const height = dimensions.height * scale;
+
+        return {
+            width,
+            height,
+            left: (previewBounds.width - width) / 2,
+            top: (previewBounds.height - height) / 2,
+        };
+    }
+
+    function getScaledMediaBounds(
+        bounds: PreviewMediaBounds,
+        scalePercent: number,
+    ) {
+        const scale = scalePercent / 100;
+        const width = bounds.width * scale;
+        const height = bounds.height * scale;
+
+        return {
+            width,
+            height,
+            left: bounds.left + (bounds.width - width) / 2,
+            top: bounds.top + (bounds.height - height) / 2,
+        };
     }
 
     function createTimelineClipsFromMedia(item: ProjectMedia, start: number) {
@@ -1855,6 +2069,31 @@ export default function Editor({
         });
     }
 
+    function startVisualPreviewDrag(
+        event: React.MouseEvent<HTMLDivElement | HTMLButtonElement>,
+        clip: TimelineClip,
+        action: 'move' | 'scale',
+    ) {
+        event.preventDefault();
+        event.stopPropagation();
+        setSelectedClipId(clip.id);
+        setIsPlaying(false);
+
+        // Dragging visual clips in the preview updates the same transform values used by the resize panel.
+        setVisualPreviewDragState({
+            action,
+            clipId: clip.id,
+            startClientX: event.clientX,
+            startClientY: event.clientY,
+            startPositionX: clip.positionX,
+            startPositionY: clip.positionY,
+            startScale: clip.scale,
+            startRotation: clip.rotation,
+            mediaBounds: getContainedMediaBounds(clip),
+            startingClips: timelineClips,
+        });
+    }
+
     function openMediaPicker() {
         fileInputRef.current?.click();
     }
@@ -2370,7 +2609,7 @@ export default function Editor({
                             <div className="flex aspect-video w-full items-center justify-center overflow-hidden rounded bg-black shadow-2xl">
                                 <div
                                     ref={previewFrameRef}
-                                    className={`${previewFrame.className} relative max-h-[92%] max-w-[92%] overflow-hidden rounded-sm border border-cyan-400/30 bg-zinc-900/80 shadow-[0_0_0_9999px_rgba(0,0,0,0.2)]`}
+                                    className={`${previewFrame.className} relative max-h-[92%] max-w-[92%] overflow-visible rounded-sm border border-cyan-400/30 bg-zinc-900/80 shadow-[0_0_0_9999px_rgba(0,0,0,0.2)]`}
                                     style={{
                                         aspectRatio: previewFrame.aspectRatio,
                                     }}
@@ -2380,55 +2619,137 @@ export default function Editor({
                                         {project.format}
                                     </div>
 
-                                    <div
-                                        className="absolute inset-0 flex items-center justify-center text-center transition"
-                                        style={{
-                                            transform: activeClip
-                                                ? `translate(${activeClip.positionX}px, ${activeClip.positionY}px) rotate(${activeClip.rotation}deg) scale(${activeClip.scale / 100})`
-                                                : undefined,
-                                        }}
-                                    >
-                                        {activeClip?.type === 'image' ? (
-                                            <img
-                                                alt={activeClip.name}
-                                                className="size-full object-cover"
-                                                src={activeClip.url ?? ''}
-                                            />
-                                        ) : activeClip?.type === 'video' ? (
-                                            <video
-                                                ref={previewVideoRef}
-                                                className="size-full object-cover"
-                                                muted
-                                                onEnded={
-                                                    finishCurrentPreviewVideo
+                                    <div className="absolute inset-0 overflow-hidden">
+                                        <div
+                                            ref={visualPreviewClipRef}
+                                            className="absolute inset-0 flex items-center justify-center text-center transition"
+                                            onMouseDown={(event) => {
+                                                if (activeClip) {
+                                                    event.stopPropagation();
+                                                    setSelectedClipId(
+                                                        activeClip.id,
+                                                    );
                                                 }
-                                                onTimeUpdate={
-                                                    updatePlayheadFromPreviewVideo
-                                                }
-                                                playsInline
-                                                preload="metadata"
-                                                src={activeClip.url ?? ''}
+                                            }}
+                                            style={{
+                                                transform: activeClip
+                                                    ? `translate(${activeClip.positionX}px, ${activeClip.positionY}px) rotate(${activeClip.rotation}deg) scale(${activeClip.scale / 100})`
+                                                    : undefined,
+                                            }}
+                                        >
+                                            {activeClip?.type === 'image' ? (
+                                                <img
+                                                    alt={activeClip.name}
+                                                    className="size-full object-contain"
+                                                    onLoad={(event) =>
+                                                        rememberMediaDimensions(
+                                                            activeClip.mediaId,
+                                                            event.currentTarget
+                                                                .naturalWidth,
+                                                            event.currentTarget
+                                                                .naturalHeight,
+                                                        )
+                                                    }
+                                                    src={activeClip.url ?? ''}
+                                                />
+                                            ) : activeClip?.type === 'video' ? (
+                                                <video
+                                                    ref={previewVideoRef}
+                                                    className="size-full object-contain"
+                                                    muted
+                                                    onEnded={
+                                                        finishCurrentPreviewVideo
+                                                    }
+                                                    onLoadedMetadata={(
+                                                        event,
+                                                    ) => {
+                                                        rememberMediaDimensions(
+                                                            activeClip.mediaId,
+                                                            event.currentTarget
+                                                                .videoWidth,
+                                                            event.currentTarget
+                                                                .videoHeight,
+                                                        );
+                                                    }}
+                                                    onTimeUpdate={
+                                                        updatePlayheadFromPreviewVideo
+                                                    }
+                                                    playsInline
+                                                    preload="metadata"
+                                                    src={activeClip.url ?? ''}
+                                                >
+                                                    <track kind="captions" />
+                                                </video>
+                                            ) : (
+                                                <div className="flex size-full items-center justify-center bg-zinc-900">
+                                                    <div>
+                                                        <Film className="mx-auto mb-4 size-16 text-cyan-400/80" />
+                                                        <p className="text-lg font-semibold text-white">
+                                                            {activeClip
+                                                                ? activeClip.name
+                                                                : previewLabel}
+                                                        </p>
+                                                        <p className="mt-1 text-sm text-zinc-500">
+                                                            {activeClip
+                                                                ? 'Current timeline clip'
+                                                                : 'Add media to the timeline'}
+                                                        </p>
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                    {activeClip &&
+                                        selectedClipId === activeClip.id &&
+                                        activeClipBoxBounds && (
+                                            <div
+                                                ref={visualPreviewBoxRef}
+                                                className="pointer-events-none absolute inset-0 transition"
+                                                style={{
+                                                    transform: `translate(${activeClip.positionX}px, ${activeClip.positionY}px) rotate(${activeClip.rotation}deg)`,
+                                                }}
                                             >
-                                                <track kind="captions" />
-                                            </video>
-                                        ) : (
-                                            <div className="flex size-full items-center justify-center bg-zinc-900">
-                                                <div>
-                                                    <Film className="mx-auto mb-4 size-16 text-cyan-400/80" />
-                                                    <p className="text-lg font-semibold text-white">
-                                                        {activeClip
-                                                            ? activeClip.name
-                                                            : previewLabel}
-                                                    </p>
-                                                    <p className="mt-1 text-sm text-zinc-500">
-                                                        {activeClip
-                                                            ? 'Current timeline clip'
-                                                            : 'Add media to the timeline'}
-                                                    </p>
+                                                <div
+                                                    ref={
+                                                        visualPreviewBoxInnerRef
+                                                    }
+                                                    className="absolute border border-cyan-300/90 shadow-[0_0_0_1px_rgba(0,0,0,0.55)]"
+                                                    style={{
+                                                        left: activeClipBoxBounds.left,
+                                                        top: activeClipBoxBounds.top,
+                                                        width: activeClipBoxBounds.width,
+                                                        height: activeClipBoxBounds.height,
+                                                    }}
+                                                >
+                                                    {[
+                                                        'top-0 left-0 -translate-x-1/2 -translate-y-1/2 cursor-nwse-resize',
+                                                        'top-0 left-1/2 -translate-x-1/2 -translate-y-1/2 cursor-ns-resize',
+                                                        'top-0 right-0 translate-x-1/2 -translate-y-1/2 cursor-nesw-resize',
+                                                        'top-1/2 right-0 -translate-y-1/2 translate-x-1/2 cursor-ew-resize',
+                                                        'right-0 bottom-0 translate-x-1/2 translate-y-1/2 cursor-nwse-resize',
+                                                        'bottom-0 left-1/2 -translate-x-1/2 translate-y-1/2 cursor-ns-resize',
+                                                        'bottom-0 left-0 -translate-x-1/2 translate-y-1/2 cursor-nesw-resize',
+                                                        'top-1/2 left-0 -translate-x-1/2 -translate-y-1/2 cursor-ew-resize',
+                                                    ].map((handleClass) => (
+                                                        <button
+                                                            className={`pointer-events-auto absolute size-3 rounded-sm border border-cyan-200 bg-zinc-950 shadow ${handleClass}`}
+                                                            key={handleClass}
+                                                            onMouseDown={(
+                                                                event,
+                                                            ) =>
+                                                                startVisualPreviewDrag(
+                                                                    event,
+                                                                    activeClip,
+                                                                    'scale',
+                                                                )
+                                                            }
+                                                            title="Resize clip"
+                                                            type="button"
+                                                        />
+                                                    ))}
                                                 </div>
                                             </div>
                                         )}
-                                    </div>
                                     {activeTextClips.map((clip, index) => (
                                         <button
                                             className={`absolute left-1/2 cursor-move text-center text-lg font-semibold text-white drop-shadow-[0_2px_8px_rgba(0,0,0,0.85)] ${
@@ -2516,7 +2837,7 @@ export default function Editor({
                                             <span className="flex items-center gap-1">
                                                 <input
                                                     className="h-8 w-20 rounded border border-zinc-700 bg-zinc-950 px-2 font-mono text-xs text-zinc-100 outline-none focus:border-cyan-500"
-                                                    max="160"
+                                                    max={maxClipScale}
                                                     min="40"
                                                     onChange={(event) =>
                                                         updateSelectedTextClipProperty(
@@ -2552,7 +2873,7 @@ export default function Editor({
                                         </span>
                                         <input
                                             className="mt-2 w-full accent-cyan-500"
-                                            max="160"
+                                            max={maxClipScale}
                                             min="40"
                                             onChange={(event) =>
                                                 updateSelectedTextClipProperty(
