@@ -13,6 +13,7 @@ use Illuminate\Support\Carbon;
  * @property int|null $project_media_id
  * @property string $name
  * @property string $type
+ * @property int $track_index
  * @property string $start
  * @property string $duration
  * @property string $source_start
@@ -30,6 +31,7 @@ use Illuminate\Support\Carbon;
     'project_media_id',
     'name',
     'type',
+    'track_index',
     'start',
     'duration',
     'source_start',

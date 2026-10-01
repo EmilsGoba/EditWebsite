@@ -70,6 +70,7 @@ class ProjectController extends Controller
                     'mediaId' => $clip->project_media_id,
                     'name' => $clip->name,
                     'type' => $clip->type,
+                    'trackIndex' => $clip->track_index,
                     'start' => (float) $clip->start,
                     'duration' => (float) $clip->duration,
                     'sourceStart' => (float) $clip->source_start,
@@ -559,6 +560,7 @@ class ProjectController extends Controller
             'clips.*.mediaId' => ['nullable', 'integer'],
             'clips.*.name' => ['required', 'string', 'max:255'],
             'clips.*.type' => ['required', Rule::in(['video', 'image', 'audio', 'text'])],
+            'clips.*.trackIndex' => ['sometimes', 'integer', 'min:1', 'max:12'],
             'clips.*.start' => ['required', 'numeric', 'min:0', 'max:3600'],
             'clips.*.duration' => ['required', 'numeric', 'min:0.01', 'max:3600'],
             'clips.*.sourceStart' => ['required', 'numeric', 'min:0', 'max:3600'],
@@ -618,6 +620,7 @@ class ProjectController extends Controller
 
                 if (
                     $clipTrack === $otherClipTrack &&
+                    (int) ($clip['trackIndex'] ?? 1) === (int) ($otherClip['trackIndex'] ?? 1) &&
                     $clipStart < $otherClipEnd &&
                     $clipEnd > $otherClipStart
                 ) {
@@ -636,6 +639,7 @@ class ProjectController extends Controller
                     'project_media_id' => $clip['mediaId'] ?? null,
                     'name' => $clip['name'],
                     'type' => $clip['type'],
+                    'track_index' => $clip['trackIndex'] ?? 1,
                     'start' => $clip['start'],
                     'duration' => $clip['duration'],
                     'source_start' => $clip['sourceStart'],

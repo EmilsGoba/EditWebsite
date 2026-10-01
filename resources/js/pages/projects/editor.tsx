@@ -54,6 +54,7 @@ type TimelineClip = {
     mediaId: number | null;
     name: string;
     type: TimelineClipType;
+    trackIndex: number;
     start: number;
     duration: number;
     sourceStart: number;
@@ -96,6 +97,7 @@ type TimelineDropPreview = {
     track: TimelineTrack;
     name: string;
     type: TimelineClipType;
+    trackIndex: number;
     start: number;
     duration: number;
     canPlace: boolean;
@@ -109,6 +111,11 @@ type TimelineClipMovePreview = {
     originalStart: number;
     previewStart: number;
     offsetPixels: number;
+};
+
+type CutPreview = {
+    clipId: number;
+    time: number;
 };
 
 type TextPreviewDragState = {
@@ -156,6 +163,23 @@ const maxClipScale = 1000;
 const mediaDragType = 'application/x-video-editor-media';
 const clipDragType = 'application/x-video-editor-clip';
 const textDragType = 'application/x-video-editor-text';
+
+function getTextClipContent(name: string) {
+    return name.replace(/(?: cut)+$/i, '');
+}
+
+function getClipTrack(clip: Pick<TimelineClip, 'type'>): TimelineTrack {
+    if (clip.type === 'audio') {
+        return 'audio';
+    }
+
+    if (clip.type === 'text') {
+        return 'text';
+    }
+
+    return 'video';
+}
+
 const defaultClipProperties = {
     scale: 100,
     positionX: 0,
@@ -208,6 +232,7 @@ export default function Editor({
     const visualPreviewBoxInnerRef = useRef<HTMLDivElement>(null);
     const timelineAudioRef = useRef<HTMLAudioElement>(null);
     const timelineScrollRef = useRef<HTMLDivElement>(null);
+    const playheadRef = useRef(0);
     const latestTrimClipsRef = useRef<TimelineClip[] | null>(null);
     const latestTextPreviewDragClipsRef = useRef<TimelineClip[] | null>(null);
     const latestVisualPreviewDragClipsRef = useRef<TimelineClip[] | null>(null);
@@ -235,6 +260,11 @@ export default function Editor({
             savedTimelineClips.map((clip) => ({
                 ...defaultClipProperties,
                 ...clip,
+                name:
+                    clip.type === 'text'
+                        ? getTextClipContent(clip.name)
+                        : clip.name,
+                trackIndex: clip.trackIndex ?? 1,
                 start: snapToTimelineStep(clip.start),
                 duration: snapToTimelineStep(clip.duration),
                 sourceStart: snapToTimelineStep(clip.sourceStart),
@@ -244,6 +274,20 @@ export default function Editor({
     );
     const [timelineClips, setTimelineClips] =
         useState<TimelineClip[]>(initialTimelineClips);
+    const [timelineTrackCounts, setTimelineTrackCounts] = useState<
+        Record<TimelineTrack, number>
+    >(() =>
+        initialTimelineClips.reduce(
+            (counts, clip) => ({
+                ...counts,
+                [getClipTrack(clip)]: Math.max(
+                    counts[getClipTrack(clip)],
+                    clip.trackIndex,
+                ),
+            }),
+            { video: 1, text: 1, audio: 1 },
+        ),
+    );
     const [history, setHistory] = useState<TimelineClip[][]>([
         initialTimelineClips,
     ]);
@@ -271,6 +315,7 @@ export default function Editor({
         useState<TimelineDropPreview | null>(null);
     const [timelineClipMovePreview, setTimelineClipMovePreview] =
         useState<TimelineClipMovePreview | null>(null);
+    const [cutPreview, setCutPreview] = useState<CutPreview | null>(null);
     const [textPreviewDragState, setTextPreviewDragState] =
         useState<TextPreviewDragState | null>(null);
     const [visualPreviewDragState, setVisualPreviewDragState] =
@@ -348,11 +393,19 @@ export default function Editor({
     );
 
     const activeClip = useMemo(() => {
-        return timelineClips.find(
-            (clip) =>
-                (clip.type === 'video' || clip.type === 'image') &&
-                playhead >= clip.start &&
-                playhead < clip.start + clip.duration,
+        return (
+            timelineClips
+                .filter(
+                    (clip) =>
+                        (clip.type === 'video' || clip.type === 'image') &&
+                        playhead >= clip.start &&
+                        playhead < clip.start + clip.duration,
+                )
+                .sort(
+                    (first, second) =>
+                        second.trackIndex - first.trackIndex ||
+                        second.start - first.start,
+                )[0] ?? null
         );
     }, [playhead, timelineClips]);
 
@@ -437,11 +490,27 @@ export default function Editor({
     }, [timelineClips, timelineSignature]);
 
     useEffect(() => {
-        if (!isPlaying || activeClip?.type === 'video' || activeAudioClip) {
+        playheadRef.current = playhead;
+    }, [playhead]);
+
+    useEffect(() => {
+        if (selectedTool !== 'cut') {
+            setCutPreview(null);
+        }
+    }, [selectedTool]);
+
+    useEffect(() => {
+        if (!isPlaying) {
             return;
         }
 
+        let lastTick = performance.now();
+
         const timer = window.setInterval(() => {
+            const now = performance.now();
+            const elapsedSeconds = (now - lastTick) / 1000;
+            lastTick = now;
+
             setPlayhead((currentTime) => {
                 if (currentTime >= timelineContentEnd) {
                     setIsPlaying(false);
@@ -449,16 +518,13 @@ export default function Editor({
                 }
 
                 return snapToTimelineStep(
-                    Math.min(
-                        timelineContentEnd,
-                        currentTime + timelineFrameDurationSeconds,
-                    ),
+                    Math.min(timelineContentEnd, currentTime + elapsedSeconds),
                 );
             });
         }, timelinePlaybackIntervalMs);
 
         return () => window.clearInterval(timer);
-    }, [activeAudioClip, activeClip?.type, isPlaying, timelineContentEnd]);
+    }, [isPlaying, timelineContentEnd]);
 
     useEffect(() => {
         const timelineScroll = timelineScrollRef.current;
@@ -515,44 +581,98 @@ export default function Editor({
 
         const clipTime = Math.max(
             0,
+            activeClip.sourceStart + playheadRef.current - activeClip.start,
+        );
+
+        if (!isPlaying) {
+            previewVideo.pause();
+            previewVideo.currentTime = clipTime;
+            return;
+        }
+
+        // On play start or clip switch, seek once. After that the browser plays the media normally.
+        previewVideo.currentTime = clipTime;
+        void previewVideo.play();
+    }, [activeClip?.id, isPlaying]);
+
+    useEffect(() => {
+        const previewVideo = previewVideoRef.current;
+
+        if (isPlaying || !previewVideo || activeClip?.type !== 'video') {
+            return;
+        }
+
+        const clipTime = Math.max(
+            0,
             activeClip.sourceStart + playhead - activeClip.start,
         );
 
-        if (
-            !isPlaying &&
-            Math.abs(previewVideo.currentTime - clipTime) > 0.08
-        ) {
+        if (Math.abs(previewVideo.currentTime - clipTime) > 0.08) {
             previewVideo.currentTime = clipTime;
         }
-
-        if (isPlaying) {
-            // Browsers allow muted video playback, so this connects our timeline play button to the preview.
-            if (previewVideo.paused) {
-                previewVideo.currentTime = clipTime;
-                void previewVideo.play();
-            }
-        } else {
-            previewVideo.pause();
-        }
-    }, [activeClip, isPlaying, playhead]);
+    }, [activeClip, isPlaying]);
 
     useEffect(() => {
         if (!isPlaying || activeClip?.type !== 'video') {
             return;
         }
 
-        const timer = window.setInterval(
-            updatePlayheadFromPreviewVideo,
-            timelinePlaybackIntervalMs,
-        );
+        const timer = window.setInterval(() => {
+            const previewVideo = previewVideoRef.current;
+
+            if (!previewVideo) {
+                return;
+            }
+
+            const expectedClipTime = Math.max(
+                0,
+                activeClip.sourceStart + playheadRef.current - activeClip.start,
+            );
+
+            if (Math.abs(previewVideo.currentTime - expectedClipTime) > 0.35) {
+                previewVideo.currentTime = expectedClipTime;
+            }
+        }, 250);
 
         return () => window.clearInterval(timer);
-    }, [activeClip, isPlaying, timelineContentEnd]);
+    }, [activeClip, isPlaying, playhead]);
 
     useEffect(() => {
         const timelineAudio = timelineAudioRef.current;
 
-        if (!timelineAudio || !activeAudioClip) {
+        if (!timelineAudio) {
+            return;
+        }
+
+        if (!activeAudioClip) {
+            timelineAudio.pause();
+            return;
+        }
+
+        const clipTime = Math.max(
+            0,
+            activeAudioClip.sourceStart +
+                playheadRef.current -
+                activeAudioClip.start,
+        );
+
+        if (!isPlaying) {
+            timelineAudio.pause();
+            timelineAudio.currentTime = clipTime;
+            return;
+        }
+
+        // Start audio once for the current clip. Constant play calls can make browsers drop audio.
+        timelineAudio.currentTime = clipTime;
+        void timelineAudio.play().catch(() => {
+            setIsPlaying(false);
+        });
+    }, [activeAudioClip?.id, isPlaying]);
+
+    useEffect(() => {
+        const timelineAudio = timelineAudioRef.current;
+
+        if (isPlaying || !timelineAudio || !activeAudioClip) {
             return;
         }
 
@@ -561,37 +681,37 @@ export default function Editor({
             activeAudioClip.sourceStart + playhead - activeAudioClip.start,
         );
 
-        if (!isPlaying) {
-            timelineAudio.pause();
-
-            if (Math.abs(timelineAudio.currentTime - clipTime) > 0.08) {
-                timelineAudio.currentTime = clipTime;
-            }
-
-            return;
-        }
-
-        // Audio clips use this hidden player so both uploaded audio and video sound can follow the timeline.
-        if (timelineAudio.paused) {
+        if (Math.abs(timelineAudio.currentTime - clipTime) > 0.08) {
             timelineAudio.currentTime = clipTime;
-            void timelineAudio.play().catch(() => {
-                setIsPlaying(false);
-            });
         }
     }, [activeAudioClip, isPlaying, playhead]);
 
     useEffect(() => {
-        if (!isPlaying || !activeAudioClip || activeClip?.type === 'video') {
+        if (!isPlaying || !activeAudioClip) {
             return;
         }
 
-        const timer = window.setInterval(
-            updatePlayheadFromTimelineAudio,
-            timelinePlaybackIntervalMs,
-        );
+        const timer = window.setInterval(() => {
+            const timelineAudio = timelineAudioRef.current;
+
+            if (!timelineAudio) {
+                return;
+            }
+
+            const expectedClipTime = Math.max(
+                0,
+                activeAudioClip.sourceStart +
+                    playheadRef.current -
+                    activeAudioClip.start,
+            );
+
+            if (Math.abs(timelineAudio.currentTime - expectedClipTime) > 0.35) {
+                timelineAudio.currentTime = expectedClipTime;
+            }
+        }, 250);
 
         return () => window.clearInterval(timer);
-    }, [activeAudioClip, activeClip?.type, isPlaying, timelineContentEnd]);
+    }, [activeAudioClip, isPlaying]);
 
     useEffect(() => {
         if (!hasAutoSaveMountedRef.current) {
@@ -982,8 +1102,12 @@ export default function Editor({
             autoSave,
             clips: clips.map((clip) => ({
                 mediaId: clip.mediaId,
-                name: clip.name,
+                name:
+                    clip.type === 'text'
+                        ? getTextClipContent(clip.name)
+                        : clip.name,
                 type: clip.type,
+                trackIndex: clip.trackIndex,
                 start: clip.start,
                 duration: clip.duration,
                 sourceStart: clip.sourceStart,
@@ -1150,13 +1274,18 @@ export default function Editor({
         };
     }
 
-    function createTimelineClipsFromMedia(item: ProjectMedia, start: number) {
+    function createTimelineClipsFromMedia(
+        item: ProjectMedia,
+        start: number,
+        trackIndex = 1,
+    ) {
         const duration = getMediaTimelineDuration(item);
         const nextClip: TimelineClip = {
             id: Date.now(),
             mediaId: item.id,
             name: item.name,
             type: item.type,
+            trackIndex,
             start,
             duration,
             sourceStart: 0,
@@ -1173,6 +1302,7 @@ export default function Editor({
                 mediaId: item.id,
                 name: `${item.name} audio`,
                 type: 'audio',
+                trackIndex: 1,
                 start,
                 duration,
                 sourceStart: 0,
@@ -1185,12 +1315,13 @@ export default function Editor({
         return nextClips;
     }
 
-    function createTextClip(start: number): TimelineClip {
+    function createTextClip(start: number, trackIndex = 1): TimelineClip {
         return {
             id: Date.now(),
             mediaId: null,
             name: 'Text',
             type: 'text',
+            trackIndex,
             start,
             duration: getTemporaryClipDuration('text'),
             sourceStart: 0,
@@ -1204,8 +1335,11 @@ export default function Editor({
         return mediaDurations[item.id] ?? getTemporaryClipDuration(item.type);
     }
 
-    function addTextToTimelineAt(start: number) {
-        const nextClip = createTextClip(snapToTimelineStep(Math.max(0, start)));
+    function addTextToTimelineAt(start: number, trackIndex = 1) {
+        const nextClip = createTextClip(
+            snapToTimelineStep(Math.max(0, start)),
+            trackIndex,
+        );
 
         if (!canPlaceTimelineClips([nextClip])) {
             return;
@@ -1216,23 +1350,17 @@ export default function Editor({
         setIsPlaying(false);
     }
 
-    function getClipTrack(clip: Pick<TimelineClip, 'type'>): TimelineTrack {
-        if (clip.type === 'audio') {
-            return 'audio';
-        }
-
-        if (clip.type === 'text') {
-            return 'text';
-        }
-
-        return 'video';
-    }
-
     function timelineClipOverlaps(
-        clip: Pick<TimelineClip, 'start' | 'duration' | 'type'>,
-        otherClip: Pick<TimelineClip, 'start' | 'duration' | 'type'>,
+        clip: Pick<TimelineClip, 'start' | 'duration' | 'type' | 'trackIndex'>,
+        otherClip: Pick<
+            TimelineClip,
+            'start' | 'duration' | 'type' | 'trackIndex'
+        >,
     ) {
-        if (getClipTrack(clip) !== getClipTrack(otherClip)) {
+        if (
+            getClipTrack(clip) !== getClipTrack(otherClip) ||
+            clip.trackIndex !== otherClip.trackIndex
+        ) {
             return false;
         }
 
@@ -1273,6 +1401,7 @@ export default function Editor({
                 (otherClip) =>
                     !ignoredClipIds.includes(otherClip.id) &&
                     getClipTrack(otherClip) === getClipTrack(clip) &&
+                    otherClip.trackIndex === clip.trackIndex &&
                     otherClip.start + otherClip.duration <=
                         clip.start + timelineOverlapGapSeconds,
             )
@@ -1293,6 +1422,7 @@ export default function Editor({
                 (otherClip) =>
                     !ignoredClipIds.includes(otherClip.id) &&
                     getClipTrack(otherClip) === getClipTrack(clip) &&
+                    otherClip.trackIndex === clip.trackIndex &&
                     otherClip.start >=
                         clip.start + clip.duration - timelineOverlapGapSeconds,
             )
@@ -1370,9 +1500,17 @@ export default function Editor({
         );
     }
 
-    function addMediaToTimelineAt(item: ProjectMedia, start: number) {
+    function addMediaToTimelineAt(
+        item: ProjectMedia,
+        start: number,
+        trackIndex = 1,
+    ) {
         const nextStart = snapToTimelineStep(Math.max(0, start));
-        const nextClips = createTimelineClipsFromMedia(item, nextStart);
+        const nextClips = createTimelineClipsFromMedia(
+            item,
+            nextStart,
+            trackIndex,
+        );
         const primaryClip = nextClips[0];
 
         if (!canPlaceTimelineClips(nextClips)) {
@@ -1384,7 +1522,11 @@ export default function Editor({
         setIsPlaying(false);
     }
 
-    function moveTimelineClipTo(clipId: number, start: number) {
+    function moveTimelineClipTo(
+        clipId: number,
+        start: number,
+        trackIndex?: number,
+    ) {
         const movingClip = timelineClips.find((clip) => clip.id === clipId);
 
         if (!movingClip) {
@@ -1407,6 +1549,10 @@ export default function Editor({
                 linkedClipIds.includes(clip.id)
                     ? {
                           ...clip,
+                          trackIndex:
+                              clip.id === movingClip.id
+                                  ? (trackIndex ?? clip.trackIndex)
+                                  : clip.trackIndex,
                           start: snapToTimelineStep(
                               Math.max(0, clip.start + moveDistance),
                           ),
@@ -1630,6 +1776,13 @@ export default function Editor({
         return type === 'video' || type === 'image';
     }
 
+    function addTimelineTrack(track: TimelineTrack) {
+        setTimelineTrackCounts((counts) => ({
+            ...counts,
+            [track]: counts[track] + 1,
+        }));
+    }
+
     function startTextDrag(event: React.DragEvent<HTMLButtonElement>) {
         event.dataTransfer.effectAllowed = 'copy';
         event.dataTransfer.setData(textDragType, 'text');
@@ -1712,6 +1865,7 @@ export default function Editor({
     function allowTimelineDrop(
         event: React.DragEvent<HTMLDivElement>,
         track: TimelineTrack,
+        trackIndex = 1,
     ) {
         if (event.dataTransfer.types.includes(textDragType)) {
             if (!canPlaceOnTrack('text', track)) {
@@ -1722,7 +1876,7 @@ export default function Editor({
             const previewStart = snapToTimelineStep(
                 getTimelineDropStart(event),
             );
-            const previewClip = createTextClip(previewStart);
+            const previewClip = createTextClip(previewStart, trackIndex);
 
             event.preventDefault();
             event.dataTransfer.dropEffect = 'copy';
@@ -1730,6 +1884,7 @@ export default function Editor({
                 track,
                 name: previewClip.name,
                 type: previewClip.type,
+                trackIndex,
                 start: previewStart,
                 duration: previewClip.duration,
                 canPlace: canPlaceTimelineClips([previewClip]),
@@ -1749,6 +1904,7 @@ export default function Editor({
             const previewClips = createTimelineClipsFromMedia(
                 draggingMedia,
                 previewStart,
+                trackIndex,
             );
 
             event.preventDefault();
@@ -1757,6 +1913,7 @@ export default function Editor({
                 track,
                 name: draggingMedia.name,
                 type: draggingMedia.type,
+                trackIndex,
                 start: previewStart,
                 duration: getMediaTimelineDuration(draggingMedia),
                 canPlace: canPlaceTimelineClips(previewClips),
@@ -1805,12 +1962,13 @@ export default function Editor({
     function dropOnTimeline(
         event: React.DragEvent<HTMLDivElement>,
         track: TimelineTrack,
+        trackIndex = 1,
     ) {
         event.preventDefault();
 
         if (event.dataTransfer.getData(textDragType)) {
             if (canPlaceOnTrack('text', track)) {
-                addTextToTimelineAt(getTimelineDropStart(event));
+                addTextToTimelineAt(getTimelineDropStart(event), trackIndex);
             }
 
             setTimelineDropPreview(null);
@@ -1831,7 +1989,11 @@ export default function Editor({
                 return;
             }
 
-            addMediaToTimelineAt(draggedMedia, getTimelineDropStart(event));
+            addMediaToTimelineAt(
+                draggedMedia,
+                getTimelineDropStart(event),
+                trackIndex,
+            );
             stopMediaDrag();
             return;
         }
@@ -1863,70 +2025,12 @@ export default function Editor({
             return;
         }
 
-        moveTimelineClipTo(clipId, getTimelineDropStart(event, offsetPixels));
+        moveTimelineClipTo(
+            clipId,
+            getTimelineDropStart(event, offsetPixels),
+            trackIndex,
+        );
         stopTimelineClipDrag();
-    }
-
-    function updatePlayheadFromPreviewVideo() {
-        const previewVideo = previewVideoRef.current;
-
-        if (!previewVideo || activeClip?.type !== 'video') {
-            return;
-        }
-
-        const nextTime = snapToTimelineStep(
-            activeClip.start +
-                previewVideo.currentTime -
-                activeClip.sourceStart,
-        );
-        const clipEnd = activeClip.start + activeClip.duration;
-
-        if (nextTime >= clipEnd) {
-            setPlayhead(snapToTimelineStep(clipEnd));
-
-            if (!hasVisualClipAfter(clipEnd)) {
-                previewVideo.pause();
-            }
-
-            if (clipEnd >= timelineContentEnd) {
-                setIsPlaying(false);
-            }
-
-            return;
-        }
-
-        setPlayhead(nextTime);
-    }
-
-    function updatePlayheadFromTimelineAudio() {
-        const timelineAudio = timelineAudioRef.current;
-
-        if (!timelineAudio || !activeAudioClip) {
-            return;
-        }
-
-        const nextTime = snapToTimelineStep(
-            activeAudioClip.start +
-                timelineAudio.currentTime -
-                activeAudioClip.sourceStart,
-        );
-        const clipEnd = activeAudioClip.start + activeAudioClip.duration;
-
-        if (nextTime >= clipEnd) {
-            setPlayhead(snapToTimelineStep(clipEnd));
-
-            if (!hasAudioClipAfter(clipEnd)) {
-                timelineAudio.pause();
-            }
-
-            if (clipEnd >= timelineContentEnd) {
-                setIsPlaying(false);
-            }
-
-            return;
-        }
-
-        setPlayhead(nextTime);
     }
 
     function finishCurrentPreviewVideo() {
@@ -1961,44 +2065,29 @@ export default function Editor({
         }
     }
 
-    function hasVisualClipAfter(time: number) {
-        return timelineClips.some(
-            (clip) =>
-                (clip.type === 'video' || clip.type === 'image') &&
-                Math.abs(clip.start - time) <= timelineFrameDurationSeconds / 2,
-        );
-    }
+    function cutTimelineClipAt(clip: TimelineClip, cutTime: number) {
+        const snappedCutTime = snapToTimelineStep(cutTime);
+        const cutOffset = snapToTimelineStep(snappedCutTime - clip.start);
 
-    function hasAudioClipAfter(time: number) {
-        return timelineClips.some(
-            (clip) =>
-                clip.type === 'audio' &&
-                Math.abs(clip.start - time) <= timelineFrameDurationSeconds / 2,
-        );
-    }
-
-    function cutSelectedClip() {
-        const clip = selectedClip;
-
-        if (!clip) {
+        if (
+            cutOffset <= timelineFrameDurationSeconds ||
+            cutOffset >= clip.duration - timelineFrameDurationSeconds
+        ) {
             return;
         }
 
-        const cutOffset = playhead - clip.start;
-
-        if (cutOffset <= 0.25 || cutOffset >= clip.duration - 0.25) {
-            return;
-        }
-
+        const clipName =
+            clip.type === 'text' ? getTextClipContent(clip.name) : clip.name;
         const firstPart: TimelineClip = {
             ...clip,
+            name: clipName,
             duration: cutOffset,
         };
         const secondPart: TimelineClip = {
             ...clip,
             id: Date.now(),
-            name: `${clip.name} cut`,
-            start: playhead,
+            name: clipName,
+            start: snappedCutTime,
             duration: clip.duration - cutOffset,
             sourceStart: clip.sourceStart + cutOffset,
         };
@@ -2012,6 +2101,88 @@ export default function Editor({
                 .sort((first, second) => first.start - second.start),
         );
         setSelectedClipId(secondPart.id);
+    }
+
+    function getTimelineClipPointerTime(
+        event: React.MouseEvent<HTMLButtonElement>,
+        clip: TimelineClip,
+    ) {
+        const clipBounds = event.currentTarget.getBoundingClientRect();
+        const clickRatio =
+            clipBounds.width > 0
+                ? Math.min(
+                      1,
+                      Math.max(
+                          0,
+                          (event.clientX - clipBounds.left) / clipBounds.width,
+                      ),
+                  )
+                : 0;
+
+        return snapToTimelineStep(clip.start + clip.duration * clickRatio);
+    }
+
+    function updateCutPreviewFromPointer(
+        event: React.MouseEvent<HTMLButtonElement>,
+        clip: TimelineClip,
+    ) {
+        if (selectedTool !== 'cut') {
+            return;
+        }
+
+        const target = event.target as HTMLElement | null;
+
+        if (target?.closest('[data-resize-handle]')) {
+            return;
+        }
+
+        setCutPreview({
+            clipId: clip.id,
+            time: getTimelineClipPointerTime(event, clip),
+        });
+    }
+
+    function clearCutPreview(clipId?: number) {
+        setCutPreview((currentPreview) =>
+            clipId === undefined || currentPreview?.clipId === clipId
+                ? null
+                : currentPreview,
+        );
+    }
+
+    function renderCutPreviewMarker(clip: TimelineClip) {
+        if (selectedTool !== 'cut' || cutPreview?.clipId !== clip.id) {
+            return null;
+        }
+
+        const markerPosition = Math.max(
+            0,
+            Math.min(
+                secondsToPixels(clip.duration),
+                secondsToPixels(cutPreview.time - clip.start),
+            ),
+        );
+
+        return (
+            <span
+                className="pointer-events-none absolute top-0 bottom-0 z-20 w-0.5 bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.8)]"
+                style={{ left: markerPosition }}
+            />
+        );
+    }
+
+    function cutTimelineClipFromClick(
+        event: React.MouseEvent<HTMLButtonElement>,
+        clip: TimelineClip,
+    ) {
+        const target = event.target as HTMLElement | null;
+
+        if (target?.closest('[data-resize-handle]')) {
+            return;
+        }
+
+        cutTimelineClipAt(clip, getTimelineClipPointerTime(event, clip));
+        clearCutPreview(clip.id);
     }
 
     function deleteSelectedTimelineClip() {
@@ -2059,7 +2230,7 @@ export default function Editor({
                 clip.id === selectedTextClip.id
                     ? {
                           ...clip,
-                          name,
+                          name: getTextClipContent(name),
                       }
                     : clip,
             ),
@@ -2256,6 +2427,153 @@ export default function Editor({
     function selectTool(tool: 'select' | 'cut') {
         // This remembers which timeline tool is selected.
         setSelectedTool(tool);
+    }
+
+    function renderTimelineLane(track: TimelineTrack, trackIndex: number) {
+        const isVideoTrack = track === 'video';
+        const trackClips = timelineClips.filter(
+            (clip) =>
+                getClipTrack(clip) === track && clip.trackIndex === trackIndex,
+        );
+        const clipHeightClass = isVideoTrack ? 'h-14' : 'h-9';
+        const minHeightClass = isVideoTrack ? 'min-h-24' : 'min-h-16';
+        const emptyText =
+            track === 'video'
+                ? 'Drag video or images here'
+                : track === 'text'
+                  ? 'Drag text here'
+                  : 'Drag audio here';
+
+        return (
+            <div
+                className="grid grid-cols-[92px_1fr] border-t border-zinc-800"
+                key={`${track}-${trackIndex}`}
+            >
+                <div className="border-r border-zinc-800 p-3 text-xs text-zinc-500">
+                    {track === 'video'
+                        ? `Video ${trackIndex}`
+                        : track === 'audio'
+                          ? `Audio ${trackIndex}`
+                          : `Text ${trackIndex}`}
+                </div>
+                <div
+                    data-timeline-track
+                    className={`relative ${minHeightClass} p-3`}
+                    onDragLeave={leaveTimelineDrop}
+                    onDragOver={(event) =>
+                        allowTimelineDrop(event, track, trackIndex)
+                    }
+                    onDrop={(event) => dropOnTimeline(event, track, trackIndex)}
+                >
+                    <div
+                        className="absolute top-0 bottom-0 z-20 w-px bg-red-500"
+                        style={{ left: secondsToPixels(playhead) }}
+                    />
+                    {getTimelineDragMarkerStart() !== null && (
+                        <div
+                            className="pointer-events-none absolute top-0 bottom-0 z-30 w-px bg-red-400"
+                            style={{
+                                left: secondsToPixels(
+                                    getTimelineDragMarkerStart() ?? 0,
+                                ),
+                            }}
+                        />
+                    )}
+                    {trackClips.map((clip) => (
+                        <button
+                            className={`${clip.color} absolute top-3 flex ${clipHeightClass} items-center overflow-hidden rounded px-3 text-left text-sm font-medium text-white ${
+                                selectedTool === 'cut'
+                                    ? 'cursor-crosshair'
+                                    : 'cursor-grab active:cursor-grabbing'
+                            } ${
+                                selectedClipId === clip.id
+                                    ? 'ring-2 ring-cyan-300'
+                                    : ''
+                            }`}
+                            draggable={selectedTool !== 'cut'}
+                            key={clip.id}
+                            onClick={(event) => {
+                                event.stopPropagation();
+
+                                if (selectedTool === 'cut') {
+                                    cutTimelineClipFromClick(event, clip);
+                                    return;
+                                }
+
+                                selectTimelineClip(clip);
+                            }}
+                            onDragEnd={stopTimelineClipDrag}
+                            onDragStart={(event) =>
+                                startTimelineClipDrag(event, clip)
+                            }
+                            onMouseLeave={() => clearCutPreview(clip.id)}
+                            onMouseMove={(event) =>
+                                updateCutPreviewFromPointer(event, clip)
+                            }
+                            style={{
+                                left: secondsToPixels(
+                                    getTimelineClipPreviewStart(clip),
+                                ),
+                                width: Math.max(
+                                    secondsToPixels(clip.duration),
+                                    24,
+                                ),
+                            }}
+                            type="button"
+                        >
+                            <span
+                                data-resize-handle
+                                className="absolute top-0 bottom-0 left-0 z-10 w-2 cursor-ew-resize bg-white/10 transition hover:bg-white/35"
+                                onMouseDown={(event) =>
+                                    startClipTrim(event, clip, 'left')
+                                }
+                            />
+                            {renderCutPreviewMarker(clip)}
+                            <span className="truncate">{clip.name}</span>
+                            <span
+                                data-resize-handle
+                                className="absolute top-0 right-0 bottom-0 z-10 w-2 cursor-ew-resize bg-white/10 transition hover:bg-white/35"
+                                onMouseDown={(event) =>
+                                    startClipTrim(event, clip, 'right')
+                                }
+                            />
+                        </button>
+                    ))}
+                    {timelineDropPreview?.track === track &&
+                        timelineDropPreview.trackIndex === trackIndex && (
+                            <div
+                                className={`${timelineDropPreview.canPlace ? getTimelineColor(timelineDropPreview.type) : 'bg-red-500/80'} pointer-events-none absolute top-3 z-10 flex ${clipHeightClass} items-center overflow-hidden rounded border px-3 text-left text-sm font-medium text-white opacity-45 ${
+                                    timelineDropPreview.canPlace
+                                        ? 'border-white/35'
+                                        : 'border-red-200'
+                                }`}
+                                style={{
+                                    left: secondsToPixels(
+                                        timelineDropPreview.start,
+                                    ),
+                                    width: Math.max(
+                                        secondsToPixels(
+                                            timelineDropPreview.duration,
+                                        ),
+                                        24,
+                                    ),
+                                }}
+                            >
+                                <span className="truncate">
+                                    {timelineDropPreview.name}
+                                </span>
+                            </div>
+                        )}
+                    {trackClips.length === 0 && (
+                        <div
+                            className={`flex ${clipHeightClass} items-center justify-center rounded border border-dashed border-zinc-800 text-xs text-zinc-600`}
+                        >
+                            {emptyText}
+                        </div>
+                    )}
+                </div>
+            </div>
+        );
     }
 
     function undoTemporaryChange() {
@@ -2672,6 +2990,22 @@ export default function Editor({
                                 <div
                                     ref={previewFrameRef}
                                     className={`${previewFrame.className} relative max-h-[92%] max-w-[92%] overflow-visible rounded-sm border border-cyan-400/30 bg-zinc-900/80 shadow-[0_0_0_9999px_rgba(0,0,0,0.2)]`}
+                                    onMouseDownCapture={(event) => {
+                                        const target =
+                                            event.target as HTMLElement | null;
+
+                                        if (
+                                            target?.closest(
+                                                '[data-text-preview], [data-preview-resize-handle]',
+                                            )
+                                        ) {
+                                            return;
+                                        }
+
+                                        if (activeClip) {
+                                            setSelectedClipId(activeClip.id);
+                                        }
+                                    }}
                                     style={{
                                         aspectRatio: previewFrame.aspectRatio,
                                     }}
@@ -2684,7 +3018,7 @@ export default function Editor({
                                     <div className="absolute inset-0 overflow-hidden">
                                         <div
                                             ref={visualPreviewClipRef}
-                                            className="absolute inset-0 flex items-center justify-center text-center transition"
+                                            className="absolute inset-0 flex items-center justify-center text-center"
                                             onMouseDown={(event) => {
                                                 if (activeClip) {
                                                     event.stopPropagation();
@@ -2733,9 +3067,6 @@ export default function Editor({
                                                                 .videoHeight,
                                                         );
                                                     }}
-                                                    onTimeUpdate={
-                                                        updatePlayheadFromPreviewVideo
-                                                    }
                                                     playsInline
                                                     preload="metadata"
                                                     src={activeClip.url ?? ''}
@@ -2766,7 +3097,7 @@ export default function Editor({
                                         activeClipBoxBounds && (
                                             <div
                                                 ref={visualPreviewBoxRef}
-                                                className="pointer-events-none absolute inset-0 transition"
+                                                className="pointer-events-none absolute inset-0"
                                                 style={{
                                                     transform: `translate(${activeClip.positionX}px, ${activeClip.positionY}px) rotate(${activeClip.rotation}deg)`,
                                                 }}
@@ -2784,18 +3115,31 @@ export default function Editor({
                                                     }}
                                                 >
                                                     {[
-                                                        'top-0 left-0 -translate-x-1/2 -translate-y-1/2 cursor-nwse-resize',
-                                                        'top-0 left-1/2 -translate-x-1/2 -translate-y-1/2 cursor-ns-resize',
-                                                        'top-0 right-0 translate-x-1/2 -translate-y-1/2 cursor-nesw-resize',
-                                                        'top-1/2 right-0 -translate-y-1/2 translate-x-1/2 cursor-ew-resize',
-                                                        'right-0 bottom-0 translate-x-1/2 translate-y-1/2 cursor-nwse-resize',
-                                                        'bottom-0 left-1/2 -translate-x-1/2 translate-y-1/2 cursor-ns-resize',
-                                                        'bottom-0 left-0 -translate-x-1/2 translate-y-1/2 cursor-nesw-resize',
-                                                        'top-1/2 left-0 -translate-x-1/2 -translate-y-1/2 cursor-ew-resize',
-                                                    ].map((handleClass) => (
+                                                        {
+                                                            className:
+                                                                'top-0 left-0 -translate-x-1/2 -translate-y-1/2 cursor-nwse-resize',
+                                                            label: 'top left',
+                                                        },
+                                                        {
+                                                            className:
+                                                                'top-0 right-0 translate-x-1/2 -translate-y-1/2 cursor-nesw-resize',
+                                                            label: 'top right',
+                                                        },
+                                                        {
+                                                            className:
+                                                                'right-0 bottom-0 translate-x-1/2 translate-y-1/2 cursor-nwse-resize',
+                                                            label: 'bottom right',
+                                                        },
+                                                        {
+                                                            className:
+                                                                'bottom-0 left-0 -translate-x-1/2 translate-y-1/2 cursor-nesw-resize',
+                                                            label: 'bottom left',
+                                                        },
+                                                    ].map((handle) => (
                                                         <button
-                                                            className={`pointer-events-auto absolute size-3 rounded-sm border border-cyan-200 bg-zinc-950 shadow ${handleClass}`}
-                                                            key={handleClass}
+                                                            className={`pointer-events-auto absolute size-3 rounded-sm border border-cyan-200 bg-zinc-950 shadow ${handle.className}`}
+                                                            data-preview-resize-handle
+                                                            key={handle.label}
                                                             onMouseDown={(
                                                                 event,
                                                             ) =>
@@ -2805,7 +3149,7 @@ export default function Editor({
                                                                     'scale',
                                                                 )
                                                             }
-                                                            title="Resize clip"
+                                                            title={`Resize clip from ${handle.label}`}
                                                             type="button"
                                                         />
                                                     ))}
@@ -2819,6 +3163,7 @@ export default function Editor({
                                                     ? 'rounded outline outline-1 outline-cyan-300/70'
                                                     : ''
                                             }`}
+                                            data-text-preview
                                             key={clip.id}
                                             onMouseDown={(event) =>
                                                 startTextPreviewDrag(
@@ -3428,10 +3773,7 @@ export default function Editor({
                                                 ? 'default'
                                                 : 'outline'
                                         }
-                                        onClick={() => {
-                                            selectTool('cut');
-                                            cutSelectedClip();
-                                        }}
+                                        onClick={() => selectTool('cut')}
                                     >
                                         <Scissors className="size-4" />
                                         Cut
@@ -3585,9 +3927,31 @@ export default function Editor({
                                         </div>
                                     </div>
 
-                                    <div className="grid grid-cols-[92px_1fr]">
-                                        <div className="border-r border-zinc-800 p-3 text-xs text-zinc-500">
-                                            Video 1
+                                    {Array.from({
+                                        length: Math.max(
+                                            0,
+                                            timelineTrackCounts.video - 1,
+                                        ),
+                                    }).map((_, index) =>
+                                        renderTimelineLane(
+                                            'video',
+                                            timelineTrackCounts.video - index,
+                                        ),
+                                    )}
+
+                                    <div className="grid grid-cols-[92px_1fr] border-t border-zinc-800">
+                                        <div className="flex items-center justify-between gap-2 border-r border-zinc-800 p-3 text-xs text-zinc-500">
+                                            <span>Video 1</span>
+                                            <button
+                                                className="grid size-5 place-items-center rounded border border-zinc-700 text-zinc-300 transition hover:border-cyan-400 hover:text-cyan-300"
+                                                onClick={() =>
+                                                    addTimelineTrack('video')
+                                                }
+                                                title="Add video track"
+                                                type="button"
+                                            >
+                                                <Plus className="size-3" />
+                                            </button>
                                         </div>
                                         <div
                                             data-timeline-track
@@ -3597,10 +3961,15 @@ export default function Editor({
                                                 allowTimelineDrop(
                                                     event,
                                                     'video',
+                                                    1,
                                                 )
                                             }
                                             onDrop={(event) =>
-                                                dropOnTimeline(event, 'video')
+                                                dropOnTimeline(
+                                                    event,
+                                                    'video',
+                                                    1,
+                                                )
                                             }
                                         >
                                             <div
@@ -3626,25 +3995,59 @@ export default function Editor({
                                             {timelineClips
                                                 .filter(
                                                     (clip) =>
-                                                        clip.type === 'video' ||
-                                                        clip.type === 'image',
+                                                        (clip.type ===
+                                                            'video' ||
+                                                            clip.type ===
+                                                                'image') &&
+                                                        clip.trackIndex === 1,
                                                 )
                                                 .map((clip) => (
                                                     <button
-                                                        className={`${clip.color} absolute top-3 flex h-14 cursor-grab items-center overflow-hidden rounded px-3 text-left text-sm font-medium text-white active:cursor-grabbing ${
+                                                        className={`${clip.color} absolute top-3 flex h-14 items-center overflow-hidden rounded px-3 text-left text-sm font-medium text-white ${
+                                                            selectedTool ===
+                                                            'cut'
+                                                                ? 'cursor-crosshair'
+                                                                : 'cursor-grab active:cursor-grabbing'
+                                                        } ${
                                                             selectedClipId ===
                                                             clip.id
                                                                 ? 'ring-2 ring-cyan-300'
                                                                 : ''
                                                         }`}
-                                                        draggable
+                                                        draggable={
+                                                            selectedTool !==
+                                                            'cut'
+                                                        }
                                                         key={clip.id}
                                                         onClick={(event) => {
                                                             event.stopPropagation();
+
+                                                            if (
+                                                                selectedTool ===
+                                                                'cut'
+                                                            ) {
+                                                                cutTimelineClipFromClick(
+                                                                    event,
+                                                                    clip,
+                                                                );
+                                                                return;
+                                                            }
+
                                                             selectTimelineClip(
                                                                 clip,
                                                             );
                                                         }}
+                                                        onMouseMove={(event) =>
+                                                            updateCutPreviewFromPointer(
+                                                                event,
+                                                                clip,
+                                                            )
+                                                        }
+                                                        onMouseLeave={() =>
+                                                            clearCutPreview(
+                                                                clip.id,
+                                                            )
+                                                        }
                                                         onDragStart={(event) =>
                                                             startTimelineClipDrag(
                                                                 event,
@@ -3682,6 +4085,9 @@ export default function Editor({
                                                                 )
                                                             }
                                                         />
+                                                        {renderCutPreviewMarker(
+                                                            clip,
+                                                        )}
                                                         <span className="truncate">
                                                             {clip.name}
                                                         </span>
@@ -3701,36 +4107,40 @@ export default function Editor({
                                                     </button>
                                                 ))}
                                             {timelineDropPreview?.track ===
-                                                'video' && (
-                                                <div
-                                                    className={`${timelineDropPreview.canPlace ? getTimelineColor(timelineDropPreview.type) : 'bg-red-500/80'} pointer-events-none absolute top-3 z-10 flex h-14 items-center overflow-hidden rounded border px-3 text-left text-sm font-medium text-white opacity-45 ${
-                                                        timelineDropPreview.canPlace
-                                                            ? 'border-white/35'
-                                                            : 'border-red-200'
-                                                    }`}
-                                                    style={{
-                                                        left: secondsToPixels(
-                                                            timelineDropPreview.start,
-                                                        ),
-                                                        width: Math.max(
-                                                            secondsToPixels(
-                                                                timelineDropPreview.duration,
+                                                'video' &&
+                                                timelineDropPreview.trackIndex ===
+                                                    1 && (
+                                                    <div
+                                                        className={`${timelineDropPreview.canPlace ? getTimelineColor(timelineDropPreview.type) : 'bg-red-500/80'} pointer-events-none absolute top-3 z-10 flex h-14 items-center overflow-hidden rounded border px-3 text-left text-sm font-medium text-white opacity-45 ${
+                                                            timelineDropPreview.canPlace
+                                                                ? 'border-white/35'
+                                                                : 'border-red-200'
+                                                        }`}
+                                                        style={{
+                                                            left: secondsToPixels(
+                                                                timelineDropPreview.start,
                                                             ),
-                                                            24,
-                                                        ),
-                                                    }}
-                                                >
-                                                    <span className="truncate">
-                                                        {
-                                                            timelineDropPreview.name
-                                                        }
-                                                    </span>
-                                                </div>
-                                            )}
+                                                            width: Math.max(
+                                                                secondsToPixels(
+                                                                    timelineDropPreview.duration,
+                                                                ),
+                                                                24,
+                                                            ),
+                                                        }}
+                                                    >
+                                                        <span className="truncate">
+                                                            {
+                                                                timelineDropPreview.name
+                                                            }
+                                                        </span>
+                                                    </div>
+                                                )}
                                             {timelineClips.filter(
                                                 (clip) =>
-                                                    clip.type === 'video' ||
-                                                    clip.type === 'image',
+                                                    (clip.type === 'video' ||
+                                                        clip.type ===
+                                                            'image') &&
+                                                    clip.trackIndex === 1,
                                             ).length === 0 && (
                                                 <div className="flex h-14 items-center justify-center rounded border border-dashed border-zinc-800 text-xs text-zinc-600">
                                                     Drag video or images here
@@ -3740,18 +4150,32 @@ export default function Editor({
                                     </div>
 
                                     <div className="grid grid-cols-[92px_1fr] border-t border-zinc-800">
-                                        <div className="border-r border-zinc-800 p-3 text-xs text-zinc-500">
-                                            Text
+                                        <div className="flex items-center justify-between gap-2 border-r border-zinc-800 p-3 text-xs text-zinc-500">
+                                            <span>Text 1</span>
+                                            <button
+                                                className="grid size-5 place-items-center rounded border border-zinc-700 text-zinc-300 transition hover:border-cyan-400 hover:text-cyan-300"
+                                                onClick={() =>
+                                                    addTimelineTrack('text')
+                                                }
+                                                title="Add text track"
+                                                type="button"
+                                            >
+                                                <Plus className="size-3" />
+                                            </button>
                                         </div>
                                         <div
                                             data-timeline-track
                                             className="relative min-h-16 p-3"
                                             onDragLeave={leaveTimelineDrop}
                                             onDragOver={(event) =>
-                                                allowTimelineDrop(event, 'text')
+                                                allowTimelineDrop(
+                                                    event,
+                                                    'text',
+                                                    1,
+                                                )
                                             }
                                             onDrop={(event) =>
-                                                dropOnTimeline(event, 'text')
+                                                dropOnTimeline(event, 'text', 1)
                                             }
                                         >
                                             <div
@@ -3777,24 +4201,56 @@ export default function Editor({
                                             {timelineClips
                                                 .filter(
                                                     (clip) =>
-                                                        clip.type === 'text',
+                                                        clip.type === 'text' &&
+                                                        clip.trackIndex === 1,
                                                 )
                                                 .map((clip) => (
                                                     <button
-                                                        className={`${clip.color} absolute top-3 flex h-9 cursor-grab items-center overflow-hidden rounded px-3 text-left text-sm font-medium text-white active:cursor-grabbing ${
+                                                        className={`${clip.color} absolute top-3 flex h-9 items-center overflow-hidden rounded px-3 text-left text-sm font-medium text-white ${
+                                                            selectedTool ===
+                                                            'cut'
+                                                                ? 'cursor-crosshair'
+                                                                : 'cursor-grab active:cursor-grabbing'
+                                                        } ${
                                                             selectedClipId ===
                                                             clip.id
                                                                 ? 'ring-2 ring-cyan-300'
                                                                 : ''
                                                         }`}
-                                                        draggable
+                                                        draggable={
+                                                            selectedTool !==
+                                                            'cut'
+                                                        }
                                                         key={clip.id}
                                                         onClick={(event) => {
                                                             event.stopPropagation();
+
+                                                            if (
+                                                                selectedTool ===
+                                                                'cut'
+                                                            ) {
+                                                                cutTimelineClipFromClick(
+                                                                    event,
+                                                                    clip,
+                                                                );
+                                                                return;
+                                                            }
+
                                                             selectTimelineClip(
                                                                 clip,
                                                             );
                                                         }}
+                                                        onMouseMove={(event) =>
+                                                            updateCutPreviewFromPointer(
+                                                                event,
+                                                                clip,
+                                                            )
+                                                        }
+                                                        onMouseLeave={() =>
+                                                            clearCutPreview(
+                                                                clip.id,
+                                                            )
+                                                        }
                                                         onDragStart={(event) =>
                                                             startTimelineClipDrag(
                                                                 event,
@@ -3832,6 +4288,9 @@ export default function Editor({
                                                                 )
                                                             }
                                                         />
+                                                        {renderCutPreviewMarker(
+                                                            clip,
+                                                        )}
                                                         <span className="truncate">
                                                             {clip.name}
                                                         </span>
@@ -3851,34 +4310,38 @@ export default function Editor({
                                                     </button>
                                                 ))}
                                             {timelineDropPreview?.track ===
-                                                'text' && (
-                                                <div
-                                                    className={`pointer-events-none absolute top-3 z-10 flex h-9 items-center overflow-hidden rounded border px-3 text-left text-sm font-medium text-white opacity-45 ${
-                                                        timelineDropPreview.canPlace
-                                                            ? 'border-white/35 bg-violet-600'
-                                                            : 'border-red-200 bg-red-500/80'
-                                                    }`}
-                                                    style={{
-                                                        left: secondsToPixels(
-                                                            timelineDropPreview.start,
-                                                        ),
-                                                        width: Math.max(
-                                                            secondsToPixels(
-                                                                timelineDropPreview.duration,
+                                                'text' &&
+                                                timelineDropPreview.trackIndex ===
+                                                    1 && (
+                                                    <div
+                                                        className={`pointer-events-none absolute top-3 z-10 flex h-9 items-center overflow-hidden rounded border px-3 text-left text-sm font-medium text-white opacity-45 ${
+                                                            timelineDropPreview.canPlace
+                                                                ? 'border-white/35 bg-violet-600'
+                                                                : 'border-red-200 bg-red-500/80'
+                                                        }`}
+                                                        style={{
+                                                            left: secondsToPixels(
+                                                                timelineDropPreview.start,
                                                             ),
-                                                            24,
-                                                        ),
-                                                    }}
-                                                >
-                                                    <span className="truncate">
-                                                        {
-                                                            timelineDropPreview.name
-                                                        }
-                                                    </span>
-                                                </div>
-                                            )}
+                                                            width: Math.max(
+                                                                secondsToPixels(
+                                                                    timelineDropPreview.duration,
+                                                                ),
+                                                                24,
+                                                            ),
+                                                        }}
+                                                    >
+                                                        <span className="truncate">
+                                                            {
+                                                                timelineDropPreview.name
+                                                            }
+                                                        </span>
+                                                    </div>
+                                                )}
                                             {timelineClips.filter(
-                                                (clip) => clip.type === 'text',
+                                                (clip) =>
+                                                    clip.type === 'text' &&
+                                                    clip.trackIndex === 1,
                                             ).length === 0 && (
                                                 <div className="flex h-9 items-center justify-center rounded border border-dashed border-zinc-800 text-xs text-zinc-600">
                                                     Drag text here
@@ -3887,9 +4350,28 @@ export default function Editor({
                                         </div>
                                     </div>
 
+                                    {Array.from({
+                                        length: Math.max(
+                                            0,
+                                            timelineTrackCounts.text - 1,
+                                        ),
+                                    }).map((_, index) =>
+                                        renderTimelineLane('text', index + 2),
+                                    )}
+
                                     <div className="grid grid-cols-[92px_1fr] border-t border-zinc-800">
-                                        <div className="border-r border-zinc-800 p-3 text-xs text-zinc-500">
-                                            Audio 1
+                                        <div className="flex items-center justify-between gap-2 border-r border-zinc-800 p-3 text-xs text-zinc-500">
+                                            <span>Audio 1</span>
+                                            <button
+                                                className="grid size-5 place-items-center rounded border border-zinc-700 text-zinc-300 transition hover:border-cyan-400 hover:text-cyan-300"
+                                                onClick={() =>
+                                                    addTimelineTrack('audio')
+                                                }
+                                                title="Add audio track"
+                                                type="button"
+                                            >
+                                                <Plus className="size-3" />
+                                            </button>
                                         </div>
                                         <div
                                             data-timeline-track
@@ -3899,10 +4381,15 @@ export default function Editor({
                                                 allowTimelineDrop(
                                                     event,
                                                     'audio',
+                                                    1,
                                                 )
                                             }
                                             onDrop={(event) =>
-                                                dropOnTimeline(event, 'audio')
+                                                dropOnTimeline(
+                                                    event,
+                                                    'audio',
+                                                    1,
+                                                )
                                             }
                                         >
                                             <div
@@ -3928,24 +4415,56 @@ export default function Editor({
                                             {timelineClips
                                                 .filter(
                                                     (clip) =>
-                                                        clip.type === 'audio',
+                                                        clip.type === 'audio' &&
+                                                        clip.trackIndex === 1,
                                                 )
                                                 .map((clip) => (
                                                     <button
-                                                        className={`${clip.color} absolute top-3 flex h-9 cursor-grab items-center overflow-hidden rounded px-3 text-left text-sm font-medium text-white active:cursor-grabbing ${
+                                                        className={`${clip.color} absolute top-3 flex h-9 items-center overflow-hidden rounded px-3 text-left text-sm font-medium text-white ${
+                                                            selectedTool ===
+                                                            'cut'
+                                                                ? 'cursor-crosshair'
+                                                                : 'cursor-grab active:cursor-grabbing'
+                                                        } ${
                                                             selectedClipId ===
                                                             clip.id
                                                                 ? 'ring-2 ring-cyan-300'
                                                                 : ''
                                                         }`}
-                                                        draggable
+                                                        draggable={
+                                                            selectedTool !==
+                                                            'cut'
+                                                        }
                                                         key={clip.id}
                                                         onClick={(event) => {
                                                             event.stopPropagation();
+
+                                                            if (
+                                                                selectedTool ===
+                                                                'cut'
+                                                            ) {
+                                                                cutTimelineClipFromClick(
+                                                                    event,
+                                                                    clip,
+                                                                );
+                                                                return;
+                                                            }
+
                                                             selectTimelineClip(
                                                                 clip,
                                                             );
                                                         }}
+                                                        onMouseMove={(event) =>
+                                                            updateCutPreviewFromPointer(
+                                                                event,
+                                                                clip,
+                                                            )
+                                                        }
+                                                        onMouseLeave={() =>
+                                                            clearCutPreview(
+                                                                clip.id,
+                                                            )
+                                                        }
                                                         onDragStart={(event) =>
                                                             startTimelineClipDrag(
                                                                 event,
@@ -3983,6 +4502,9 @@ export default function Editor({
                                                                 )
                                                             }
                                                         />
+                                                        {renderCutPreviewMarker(
+                                                            clip,
+                                                        )}
                                                         <span className="truncate">
                                                             {clip.name}
                                                         </span>
@@ -4002,34 +4524,38 @@ export default function Editor({
                                                     </button>
                                                 ))}
                                             {timelineDropPreview?.track ===
-                                                'audio' && (
-                                                <div
-                                                    className={`pointer-events-none absolute top-3 z-10 flex h-9 items-center overflow-hidden rounded border px-3 text-left text-sm font-medium text-white opacity-45 ${
-                                                        timelineDropPreview.canPlace
-                                                            ? 'border-white/35 bg-emerald-700/80'
-                                                            : 'border-red-200 bg-red-500/80'
-                                                    }`}
-                                                    style={{
-                                                        left: secondsToPixels(
-                                                            timelineDropPreview.start,
-                                                        ),
-                                                        width: Math.max(
-                                                            secondsToPixels(
-                                                                timelineDropPreview.duration,
+                                                'audio' &&
+                                                timelineDropPreview.trackIndex ===
+                                                    1 && (
+                                                    <div
+                                                        className={`pointer-events-none absolute top-3 z-10 flex h-9 items-center overflow-hidden rounded border px-3 text-left text-sm font-medium text-white opacity-45 ${
+                                                            timelineDropPreview.canPlace
+                                                                ? 'border-white/35 bg-emerald-700/80'
+                                                                : 'border-red-200 bg-red-500/80'
+                                                        }`}
+                                                        style={{
+                                                            left: secondsToPixels(
+                                                                timelineDropPreview.start,
                                                             ),
-                                                            24,
-                                                        ),
-                                                    }}
-                                                >
-                                                    <span className="truncate">
-                                                        {
-                                                            timelineDropPreview.name
-                                                        }
-                                                    </span>
-                                                </div>
-                                            )}
+                                                            width: Math.max(
+                                                                secondsToPixels(
+                                                                    timelineDropPreview.duration,
+                                                                ),
+                                                                24,
+                                                            ),
+                                                        }}
+                                                    >
+                                                        <span className="truncate">
+                                                            {
+                                                                timelineDropPreview.name
+                                                            }
+                                                        </span>
+                                                    </div>
+                                                )}
                                             {timelineClips.filter(
-                                                (clip) => clip.type === 'audio',
+                                                (clip) =>
+                                                    clip.type === 'audio' &&
+                                                    clip.trackIndex === 1,
                                             ).length === 0 && (
                                                 <div className="flex h-9 items-center justify-center rounded border border-dashed border-zinc-800 text-xs text-zinc-600">
                                                     Drag audio here
@@ -4037,6 +4563,15 @@ export default function Editor({
                                             )}
                                         </div>
                                     </div>
+
+                                    {Array.from({
+                                        length: Math.max(
+                                            0,
+                                            timelineTrackCounts.audio - 1,
+                                        ),
+                                    }).map((_, index) =>
+                                        renderTimelineLane('audio', index + 2),
+                                    )}
                                 </div>
                             </div>
                         </section>
