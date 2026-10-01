@@ -145,6 +145,9 @@ class ProjectController extends Controller
      */
     public function renderExport(Request $request, Project $project): RedirectResponse|BinaryFileResponse
     {
+        @set_time_limit(300);
+        ini_set('max_execution_time', '300');
+
         $project = $request->user()->projects()->findOrFail($project->id);
 
         $validated = $request->validate([
@@ -209,15 +212,8 @@ class ProjectController extends Controller
                     $mediaPath,
                 );
             } else {
-                array_push(
-                    $command,
-                    '-ss',
-                    (string) $clip->source_start,
-                    '-t',
-                    (string) $clip->duration,
-                    '-i',
-                    $mediaPath,
-                );
+                $command[] = '-i';
+                $command[] = $mediaPath;
             }
 
             $clipExportScale = $this->previewExportScale($project->format, $renderSize, $clip);
@@ -226,15 +222,28 @@ class ProjectController extends Controller
             $positionX = (int) round((float) $clip->position_x * $clipExportScale);
             $positionY = (int) round((float) $clip->position_y * $clipExportScale);
 
+            if ($clip->type === 'image') {
+                $filters[] = sprintf(
+                    '[%d:v]scale=%d:%d:force_original_aspect_ratio=decrease,fps=60,setsar=1,format=rgba[clip%dscaled]',
+                    $index,
+                    $this->evenDimension($scaledWidth),
+                    $this->evenDimension($scaledHeight),
+                    $index,
+                );
+            } else {
+                $filters[] = sprintf(
+                    '[%d:v]trim=start=%F:duration=%F,setpts=PTS-STARTPTS,scale=%d:%d:force_original_aspect_ratio=decrease,fps=60,setsar=1,format=rgba[clip%dscaled]',
+                    $index,
+                    (float) $clip->source_start,
+                    (float) $clip->duration,
+                    $this->evenDimension($scaledWidth),
+                    $this->evenDimension($scaledHeight),
+                    $index,
+                );
+            }
+
             $filters[] = sprintf(
-                '[%d:v]scale=%d:%d:force_original_aspect_ratio=decrease,fps=30,setsar=1,format=rgba[clip%dscaled]',
-                $index,
-                $this->evenDimension($scaledWidth),
-                $this->evenDimension($scaledHeight),
-                $index,
-            );
-            $filters[] = sprintf(
-                'color=c=black:s=%dx%d:d=%F:r=30[clip%dcanvas]',
+                'color=c=black:s=%dx%d:d=%F:r=60[clip%dcanvas]',
                 $renderSize['width'],
                 $renderSize['height'],
                 (float) $clip->duration,
@@ -367,6 +376,10 @@ class ProjectController extends Controller
             $command,
             '-c:v',
             'libx264',
+            '-preset',
+            'veryfast',
+            '-crf',
+            '23',
             '-pix_fmt',
             'yuv420p',
             '-movflags',

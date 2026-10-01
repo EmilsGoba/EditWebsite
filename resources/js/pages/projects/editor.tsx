@@ -211,6 +211,11 @@ export default function Editor({
     const latestTrimClipsRef = useRef<TimelineClip[] | null>(null);
     const latestTextPreviewDragClipsRef = useRef<TimelineClip[] | null>(null);
     const latestVisualPreviewDragClipsRef = useRef<TimelineClip[] | null>(null);
+    const pendingSaveRef = useRef<{
+        clips: TimelineClip[];
+        autoSave: boolean;
+    } | null>(null);
+    const isSavingTimelineRef = useRef(false);
     const autoSaveTimerRef = useRef<number | null>(null);
     const hasAutoSaveMountedRef = useRef(false);
     const activeSaveRequestRef = useRef(0);
@@ -248,6 +253,7 @@ export default function Editor({
     const [isSavingTimeline, setIsSavingTimeline] = useState(false);
     const [saveStatus, setSaveStatus] = useState<'saved' | 'unsaved'>('saved');
     const [isAutoSaveEnabled, setIsAutoSaveEnabled] = useState(false);
+    const [saveError, setSaveError] = useState<string | null>(null);
     const [selectedTool, setSelectedTool] = useState<'select' | 'cut'>(
         'select',
     );
@@ -960,6 +966,7 @@ export default function Editor({
         setHistoryIndex(nextHistory.length - 1);
         setTimelineClips(snappedClips);
         setSaveStatus('unsaved');
+        setSaveError(null);
     }
 
     function getTimelineSavePayload(clips: TimelineClip[], autoSave = false) {
@@ -1005,7 +1012,11 @@ export default function Editor({
     }
 
     function saveTimeline(clipsToSave = timelineClips, autoSave = false) {
-        if (isSavingTimeline) {
+        if (isSavingTimelineRef.current) {
+            pendingSaveRef.current = {
+                clips: clipsToSave,
+                autoSave,
+            };
             return;
         }
 
@@ -1013,7 +1024,9 @@ export default function Editor({
         const savedTimelineSignature = getTimelineSaveSignature(clipsToSave);
 
         activeSaveRequestRef.current = saveRequestId;
+        isSavingTimelineRef.current = true;
         setIsSavingTimeline(true);
+        setSaveError(null);
 
         // This saves the current timeline layout to MySQL, so it can load again after refresh.
         router.put(
@@ -1021,8 +1034,15 @@ export default function Editor({
             getTimelineSavePayload(clipsToSave, autoSave),
             {
                 preserveScroll: true,
-                onError: () => setSaveStatus('unsaved'),
+                onError: (errors) => {
+                    setSaveStatus('unsaved');
+                    setSaveError(
+                        Object.values(errors)[0] ??
+                            'Timeline could not be saved.',
+                    );
+                },
                 onSuccess: () => {
+                    setSaveError(null);
                     setSaveStatus(
                         savedTimelineSignature ===
                             latestTimelineSignatureRef.current
@@ -1032,7 +1052,20 @@ export default function Editor({
                 },
                 onFinish: () => {
                     if (activeSaveRequestRef.current === saveRequestId) {
+                        isSavingTimelineRef.current = false;
                         setIsSavingTimeline(false);
+
+                        const pendingSave = pendingSaveRef.current;
+
+                        if (pendingSave) {
+                            pendingSaveRef.current = null;
+                            window.setTimeout(() => {
+                                saveTimeline(
+                                    pendingSave.clips,
+                                    pendingSave.autoSave,
+                                );
+                            }, 0);
+                        }
                     }
                 },
             },
@@ -1849,8 +1882,11 @@ export default function Editor({
         const clipEnd = activeClip.start + activeClip.duration;
 
         if (nextTime >= clipEnd) {
-            previewVideo.pause();
             setPlayhead(snapToTimelineStep(clipEnd));
+
+            if (!hasVisualClipAfter(clipEnd)) {
+                previewVideo.pause();
+            }
 
             if (clipEnd >= timelineContentEnd) {
                 setIsPlaying(false);
@@ -1877,8 +1913,11 @@ export default function Editor({
         const clipEnd = activeAudioClip.start + activeAudioClip.duration;
 
         if (nextTime >= clipEnd) {
-            timelineAudio.pause();
             setPlayhead(snapToTimelineStep(clipEnd));
+
+            if (!hasAudioClipAfter(clipEnd)) {
+                timelineAudio.pause();
+            }
 
             if (clipEnd >= timelineContentEnd) {
                 setIsPlaying(false);
@@ -1920,6 +1959,22 @@ export default function Editor({
         if (clipEnd >= timelineContentEnd) {
             setIsPlaying(false);
         }
+    }
+
+    function hasVisualClipAfter(time: number) {
+        return timelineClips.some(
+            (clip) =>
+                (clip.type === 'video' || clip.type === 'image') &&
+                Math.abs(clip.start - time) <= timelineFrameDurationSeconds / 2,
+        );
+    }
+
+    function hasAudioClipAfter(time: number) {
+        return timelineClips.some(
+            (clip) =>
+                clip.type === 'audio' &&
+                Math.abs(clip.start - time) <= timelineFrameDurationSeconds / 2,
+        );
     }
 
     function cutSelectedClip() {
@@ -2299,11 +2354,18 @@ export default function Editor({
                         </div>
 
                         <div className="flex items-center justify-end gap-2">
-                            <span className="hidden text-xs text-zinc-500 sm:inline">
-                                {saveStatus === 'saved'
-                                    ? 'Saved'
-                                    : 'Unsaved changes'}
-                            </span>
+                            <div className="hidden text-right text-xs sm:block">
+                                <p className="text-zinc-500">
+                                    {saveStatus === 'saved'
+                                        ? 'Saved'
+                                        : 'Unsaved changes'}
+                                </p>
+                                {saveError && (
+                                    <p className="max-w-60 truncate text-red-400">
+                                        {saveError}
+                                    </p>
+                                )}
+                            </div>
                             <button
                                 aria-checked={isAutoSaveEnabled}
                                 className="flex items-center gap-2 rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-medium text-zinc-300 transition hover:border-zinc-700 hover:bg-zinc-900"
