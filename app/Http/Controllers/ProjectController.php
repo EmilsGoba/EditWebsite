@@ -80,6 +80,7 @@ class ProjectController extends Controller
                     'rotation' => (float) $clip->rotation,
                     'previewWidth' => $clip->preview_width,
                     'previewHeight' => $clip->preview_height,
+                    'effects' => $clip->effects ?? [],
                     'url' => $clip->media
                         ? Storage::disk($clip->media->disk)->url($clip->media->path)
                         : null,
@@ -134,6 +135,7 @@ class ProjectController extends Controller
                     'rotation' => (float) $clip->rotation,
                     'previewWidth' => $clip->preview_width,
                     'previewHeight' => $clip->preview_height,
+                    'effects' => $clip->effects ?? [],
                     'url' => $clip->media
                         ? Storage::disk($clip->media->disk)->url($clip->media->path)
                         : null,
@@ -223,22 +225,26 @@ class ProjectController extends Controller
             $positionX = (int) round((float) $clip->position_x * $clipExportScale);
             $positionY = (int) round((float) $clip->position_y * $clipExportScale);
 
+            $effectFilters = $this->clipEffectFilters($clip);
+
             if ($clip->type === 'image') {
                 $filters[] = sprintf(
-                    '[%d:v]scale=%d:%d:force_original_aspect_ratio=decrease,fps=60,setsar=1,format=rgba[clip%dscaled]',
+                    '[%d:v]scale=%d:%d:force_original_aspect_ratio=decrease,fps=60,setsar=1,format=rgba%s[clip%dscaled]',
                     $index,
                     $this->evenDimension($scaledWidth),
                     $this->evenDimension($scaledHeight),
+                    $effectFilters,
                     $index,
                 );
             } else {
                 $filters[] = sprintf(
-                    '[%d:v]trim=start=%F:duration=%F,setpts=PTS-STARTPTS,scale=%d:%d:force_original_aspect_ratio=decrease,fps=60,setsar=1,format=rgba[clip%dscaled]',
+                    '[%d:v]trim=start=%F:duration=%F,setpts=PTS-STARTPTS,scale=%d:%d:force_original_aspect_ratio=decrease,fps=60,setsar=1,format=rgba%s[clip%dscaled]',
                     $index,
                     (float) $clip->source_start,
                     (float) $clip->duration,
                     $this->evenDimension($scaledWidth),
                     $this->evenDimension($scaledHeight),
+                    $effectFilters,
                     $index,
                 );
             }
@@ -570,6 +576,10 @@ class ProjectController extends Controller
             'clips.*.rotation' => ['sometimes', 'numeric', 'min:-180', 'max:180'],
             'clips.*.previewWidth' => ['nullable', 'integer', 'min:1', 'max:4000'],
             'clips.*.previewHeight' => ['nullable', 'integer', 'min:1', 'max:4000'],
+            'clips.*.effects' => ['sometimes', 'array'],
+            'clips.*.effects.*.id' => ['required', 'string', Rule::in(['blur', 'glow', 'invert-color'])],
+            'clips.*.effects.*.start' => ['required', 'numeric', 'min:0', 'max:3600'],
+            'clips.*.effects.*.duration' => ['required', 'numeric', 'min:0.01', 'max:3600'],
         ]);
 
         $clips = collect($validated['clips'] ?? []);
@@ -649,6 +659,7 @@ class ProjectController extends Controller
                     'rotation' => $clip['rotation'] ?? 0,
                     'preview_width' => $clip['previewWidth'] ?? null,
                     'preview_height' => $clip['previewHeight'] ?? null,
+                    'effects' => $clip['effects'] ?? [],
                     'sort_order' => $index,
                 ]);
             }
@@ -727,6 +738,60 @@ class ProjectController extends Controller
         }
 
         return null;
+    }
+
+    /**
+     * Convert saved clip effects into FFmpeg filters.
+     */
+    private function clipEffectFilters(ProjectTimelineClip $clip): string
+    {
+        $effects = $clip->effects ?? [];
+        $filters = '';
+
+        foreach ($effects as $effect) {
+            if (is_string($effect) && $effect === 'invert-color') {
+                $filters .= ',negate';
+                continue;
+            }
+
+            if (is_string($effect) && $effect === 'blur') {
+                $filters .= ',boxblur=6';
+                continue;
+            }
+
+            if (is_string($effect) && $effect === 'glow') {
+                $filters .= ',eq=brightness=0.08:saturation=1.35:contrast=1.08';
+                continue;
+            }
+
+            if (! is_array($effect) || ! in_array(($effect['id'] ?? null), ['blur', 'glow', 'invert-color'], true)) {
+                continue;
+            }
+
+            $start = max(0, (float) ($effect['start'] ?? 0));
+            $end = min(
+                (float) $clip->duration,
+                $start + max(0.01, (float) ($effect['duration'] ?? 0)),
+            );
+
+            if ($start >= $end) {
+                continue;
+            }
+
+            if (($effect['id'] ?? null) === 'invert-color') {
+                $filters .= sprintf(",negate=enable='between(t\\,%F\\,%F)'", $start, $end);
+            }
+
+            if (($effect['id'] ?? null) === 'blur') {
+                $filters .= sprintf(",boxblur=6:enable='between(t\\,%F\\,%F)'", $start, $end);
+            }
+
+            if (($effect['id'] ?? null) === 'glow') {
+                $filters .= sprintf(",eq=brightness=0.08:saturation=1.35:contrast=1.08:enable='between(t\\,%F\\,%F)'", $start, $end);
+            }
+        }
+
+        return $filters;
     }
 
     /**

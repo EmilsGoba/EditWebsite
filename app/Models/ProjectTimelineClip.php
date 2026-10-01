@@ -23,6 +23,7 @@ use Illuminate\Support\Carbon;
  * @property string $rotation
  * @property int|null $preview_width
  * @property int|null $preview_height
+ * @property array<int, string>|null $effects
  * @property int $sort_order
  * @property Carbon|null $created_at
  * @property Carbon|null $updated_at
@@ -41,10 +42,15 @@ use Illuminate\Support\Carbon;
     'rotation',
     'preview_width',
     'preview_height',
+    'effects',
     'sort_order',
 ])]
 class ProjectTimelineClip extends Model
 {
+    protected $casts = [
+        'effects' => 'array',
+    ];
+
     /**
      * Each saved clip belongs to one editing project.
      */
