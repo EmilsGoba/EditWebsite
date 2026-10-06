@@ -134,6 +134,8 @@ type TimelineClipMovePreview = {
     linkedClipIds: number[];
     originalStart: number;
     previewStart: number;
+    trackIndex: number;
+    canPlace: boolean;
     offsetPixels: number;
 };
 
@@ -186,6 +188,9 @@ const timelineOverlapGapSeconds = timelineFrameDurationSeconds;
 const maxClipScale = 1000;
 const fixedAudioTrackCount = 2;
 const vfxMinimumWidthPixels = 18;
+const pageDragScrollEdgePixels = 120;
+const pageDragScrollMinStepPixels = 3;
+const pageDragScrollMaxStepPixels = 12;
 const mediaDragType = 'application/x-video-editor-media';
 const clipDragType = 'application/x-video-editor-clip';
 const textDragType = 'application/x-video-editor-text';
@@ -343,6 +348,7 @@ export default function Editor({
     const autoSaveTimerRef = useRef<number | null>(null);
     const hasAutoSaveMountedRef = useRef(false);
     const activeSaveRequestRef = useRef(0);
+    const latestDragClientYRef = useRef<number | null>(null);
     const [isPlaying, setIsPlaying] = useState(false);
     const [isUploading, setIsUploading] = useState(false);
     const [uploadError, setUploadError] = useState<string | null>(null);
@@ -405,6 +411,8 @@ export default function Editor({
     const [draggingMedia, setDraggingMedia] = useState<ProjectMedia | null>(
         null,
     );
+    const [isDraggingTextTool, setIsDraggingTextTool] = useState(false);
+    const [isDraggingVfxTool, setIsDraggingVfxTool] = useState(false);
     const [timelineDropPreview, setTimelineDropPreview] =
         useState<TimelineDropPreview | null>(null);
     const [timelineClipMovePreview, setTimelineClipMovePreview] =
@@ -691,6 +699,53 @@ export default function Editor({
             timelineScroll.scrollLeft = maxScrollLeft;
         }
     }, [timelineWidth]);
+
+    useEffect(() => {
+        const isDraggingTimelineItem =
+            Boolean(draggingMedia) ||
+            Boolean(timelineClipMovePreview) ||
+            isDraggingTextTool ||
+            isDraggingVfxTool;
+
+        if (!isDraggingTimelineItem) {
+            latestDragClientYRef.current = null;
+            return;
+        }
+
+        function autoScrollTimeline(event: DragEvent) {
+            if (event.clientY <= 0) {
+                return;
+            }
+
+            latestDragClientYRef.current = event.clientY;
+            scrollPageDuringDrag(event.clientY);
+        }
+
+        function tickTimelineAutoScroll() {
+            if (latestDragClientYRef.current === null) {
+                return;
+            }
+
+            scrollPageDuringDrag(latestDragClientYRef.current);
+        }
+
+        const autoScrollTimer = window.setInterval(tickTimelineAutoScroll, 16);
+
+        document.addEventListener('drag', autoScrollTimeline, true);
+        document.addEventListener('dragover', autoScrollTimeline, true);
+
+        return () => {
+            window.clearInterval(autoScrollTimer);
+            document.removeEventListener('drag', autoScrollTimeline, true);
+            document.removeEventListener('dragover', autoScrollTimeline, true);
+            latestDragClientYRef.current = null;
+        };
+    }, [
+        draggingMedia,
+        isDraggingTextTool,
+        isDraggingVfxTool,
+        timelineClipMovePreview,
+    ]);
 
     useEffect(() => {
         const previewVideo = previewVideoRef.current;
@@ -1757,14 +1812,19 @@ export default function Editor({
             return;
         }
 
+        const nextTrackIndex = getAllowedTimelineTrackIndex(
+            movingClip.type,
+            trackIndex ?? movingClip.trackIndex,
+        );
         const nextStart = getConstrainedTimelineMoveStart(
             clipId,
             start,
-            trackIndex,
+            nextTrackIndex,
         );
         const moveDistance = nextStart - movingClip.start;
+        const trackChanged = nextTrackIndex !== movingClip.trackIndex;
 
-        if (moveDistance === 0) {
+        if (moveDistance === 0 && !trackChanged) {
             setSelectedClipId(movingClip.id);
             setSelectedEffect(null);
             return;
@@ -1780,10 +1840,7 @@ export default function Editor({
                           ...clip,
                           trackIndex:
                               clip.id === movingClip.id
-                                  ? getAllowedTimelineTrackIndex(
-                                        clip.type,
-                                        trackIndex ?? clip.trackIndex,
-                                    )
+                                  ? nextTrackIndex
                                   : clip.trackIndex,
                           start: snapToTimelineStep(
                               Math.max(0, clip.start + moveDistance),
@@ -1839,6 +1896,64 @@ export default function Editor({
             timelineClipMovePreview.originalStart;
 
         return snapToTimelineStep(Math.max(0, clip.start + moveDistance));
+    }
+
+    function getTimelineClipPreviewTrackIndex(clip: TimelineClip) {
+        if (timelineClipMovePreview?.clipId !== clip.id) {
+            return clip.trackIndex;
+        }
+
+        return timelineClipMovePreview.trackIndex;
+    }
+
+    function getTimelineClipMoveClass(clip: TimelineClip) {
+        if (timelineClipMovePreview?.clipId !== clip.id) {
+            return '';
+        }
+
+        return timelineClipMovePreview.canPlace
+            ? 'ring-2 ring-cyan-300'
+            : 'ring-2 ring-red-300 opacity-70';
+    }
+
+    function getTimelineMovePreview(
+        clipId: number,
+        start: number,
+        trackIndex: number,
+    ) {
+        const movingClip = timelineClips.find((clip) => clip.id === clipId);
+
+        if (!movingClip) {
+            return null;
+        }
+
+        const nextTrackIndex = getAllowedTimelineTrackIndex(
+            movingClip.type,
+            trackIndex,
+        );
+        const previewStart = getConstrainedTimelineMoveStart(
+            clipId,
+            start,
+            nextTrackIndex,
+        );
+        const moveDistance = previewStart - movingClip.start;
+        const linkedClipIds = getLinkedClipIds(movingClip);
+        const previewClips = getLinkedTimelineClips(movingClip).map((clip) => ({
+            ...clip,
+            trackIndex:
+                clip.id === movingClip.id ? nextTrackIndex : clip.trackIndex,
+            start: snapToTimelineStep(Math.max(0, clip.start + moveDistance)),
+        }));
+
+        return {
+            previewStart,
+            trackIndex: nextTrackIndex,
+            canPlace: canPlaceTimelineClips(
+                previewClips,
+                timelineClips,
+                linkedClipIds,
+            ),
+        };
     }
 
     function getTimelineDragMarkerStart() {
@@ -2284,9 +2399,63 @@ export default function Editor({
         return type === 'video' || type === 'image';
     }
 
+    function scrollPageDuringDrag(pointerClientY: number) {
+        const pageScroller = document.scrollingElement;
+
+        if (!pageScroller) {
+            return;
+        }
+
+        const topDistance = pointerClientY;
+        const bottomDistance = window.innerHeight - pointerClientY;
+        const canScrollUp = pageScroller.scrollTop > 0;
+        const canScrollDown =
+            pageScroller.scrollTop + window.innerHeight <
+            pageScroller.scrollHeight;
+
+        if (topDistance < pageDragScrollEdgePixels && canScrollUp) {
+            window.scrollBy({
+                top: -getPageDragScrollStep(topDistance),
+                behavior: 'auto',
+            });
+            return;
+        }
+
+        if (bottomDistance < pageDragScrollEdgePixels && canScrollDown) {
+            window.scrollBy({
+                top: getPageDragScrollStep(bottomDistance),
+                behavior: 'auto',
+            });
+        }
+    }
+
+    function getPageDragScrollStep(edgeDistance: number) {
+        const edgeProgress =
+            1 -
+            Math.min(1, Math.max(0, edgeDistance / pageDragScrollEdgePixels));
+        const easedProgress = edgeProgress * edgeProgress;
+
+        return (
+            pageDragScrollMinStepPixels +
+            (pageDragScrollMaxStepPixels - pageDragScrollMinStepPixels) *
+                easedProgress
+        );
+    }
+
+    function updateTimelineDragPosition(event: React.DragEvent<HTMLElement>) {
+        if (event.clientY <= 0) {
+            return;
+        }
+
+        latestDragClientYRef.current = event.clientY;
+        scrollPageDuringDrag(event.clientY);
+    }
+
     function startTextDrag(event: React.DragEvent<HTMLButtonElement>) {
         event.dataTransfer.effectAllowed = 'copy';
         event.dataTransfer.setData(textDragType, 'text');
+        updateTimelineDragPosition(event);
+        setIsDraggingTextTool(true);
         setTimelineDropPreview(null);
 
         hideBrowserDragImage(event);
@@ -2303,6 +2472,7 @@ export default function Editor({
 
         event.dataTransfer.effectAllowed = 'copy';
         event.dataTransfer.setData(mediaDragType, String(item.id));
+        updateTimelineDragPosition(event);
         setDraggingMedia(item);
         setTimelineDropPreview(null);
 
@@ -2324,10 +2494,25 @@ export default function Editor({
     function stopMediaDrag() {
         setDraggingMedia(null);
         setTimelineDropPreview(null);
+        latestDragClientYRef.current = null;
+    }
+
+    function stopTextDrag() {
+        setIsDraggingTextTool(false);
+        setTimelineDropPreview(null);
+        latestDragClientYRef.current = null;
+    }
+
+    function stopVfxDrag() {
+        setIsDraggingVfxTool(false);
+        setTimelineDropPreview(null);
+        latestDragClientYRef.current = null;
     }
 
     function stopTimelineClipDrag() {
         setTimelineClipMovePreview(null);
+        setTimelineDropPreview(null);
+        latestDragClientYRef.current = null;
     }
 
     function startTimelineClipDrag(
@@ -2347,6 +2532,7 @@ export default function Editor({
         const offsetPixels = event.clientX - bounds.left;
 
         event.stopPropagation();
+        updateTimelineDragPosition(event);
         event.dataTransfer.effectAllowed = 'move';
         event.dataTransfer.setData(
             clipDragType,
@@ -2363,6 +2549,8 @@ export default function Editor({
             linkedClipIds: getLinkedClipIds(clip),
             originalStart: clip.start,
             previewStart: clip.start,
+            trackIndex: clip.trackIndex,
+            canPlace: true,
             offsetPixels,
         });
         hideBrowserDragImage(event);
@@ -2373,6 +2561,8 @@ export default function Editor({
         track: TimelineTrack,
         trackIndex = 1,
     ) {
+        updateTimelineDragPosition(event);
+
         if (event.dataTransfer.types.includes(vfxDragType)) {
             const targetClip = getVisualClipAtTimelinePointer(
                 event,
@@ -2452,20 +2642,29 @@ export default function Editor({
                 );
 
                 if (!draggedClip || !canPlaceOnTrack(draggedClip.type, track)) {
+                    setTimelineDropPreview(null);
+                    return;
+                }
+                const movePreview = getTimelineMovePreview(
+                    draggedClip.id,
+                    getTimelineDropStart(
+                        event,
+                        timelineClipMovePreview.offsetPixels,
+                    ),
+                    trackIndex,
+                );
+
+                if (!movePreview) {
                     return;
                 }
 
                 setTimelineClipMovePreview({
                     ...timelineClipMovePreview,
-                    previewStart: getConstrainedTimelineMoveStart(
-                        draggedClip.id,
-                        getTimelineDropStart(
-                            event,
-                            timelineClipMovePreview.offsetPixels,
-                        ),
-                        trackIndex,
-                    ),
+                    previewStart: movePreview.previewStart,
+                    trackIndex: movePreview.trackIndex,
+                    canPlace: movePreview.canPlace,
                 });
+                setTimelineDropPreview(null);
             }
 
             event.preventDefault();
@@ -2572,11 +2771,21 @@ export default function Editor({
             stopTimelineClipDrag();
             return;
         }
-
-        moveTimelineClipTo(
+        const movePreview = getTimelineMovePreview(
             clipId,
             getTimelineDropStart(event, offsetPixels),
             trackIndex,
+        );
+
+        if (!movePreview?.canPlace) {
+            stopTimelineClipDrag();
+            return;
+        }
+
+        moveTimelineClipTo(
+            clipId,
+            movePreview.previewStart,
+            movePreview.trackIndex,
         );
         stopTimelineClipDrag();
     }
@@ -2807,6 +3016,8 @@ export default function Editor({
     ) {
         event.dataTransfer.effectAllowed = 'copy';
         event.dataTransfer.setData(vfxDragType, effect);
+        updateTimelineDragPosition(event);
+        setIsDraggingVfxTool(true);
         setTimelineDropPreview(null);
 
         hideBrowserDragImage(event);
@@ -3028,7 +3239,8 @@ export default function Editor({
         const isVideoTrack = track === 'video';
         const trackClips = timelineClips.filter(
             (clip) =>
-                getClipTrack(clip) === track && clip.trackIndex === trackIndex,
+                getClipTrack(clip) === track &&
+                getTimelineClipPreviewTrackIndex(clip) === trackIndex,
         );
         const clipHeightClass = isVideoTrack ? 'h-14' : 'h-9';
         const minHeightClass = isVideoTrack ? 'min-h-24' : 'min-h-16';
@@ -3084,7 +3296,7 @@ export default function Editor({
                                 selectedClipId === clip.id
                                     ? 'ring-2 ring-cyan-300'
                                     : ''
-                            }`}
+                            } ${getTimelineClipMoveClass(clip)}`}
                             data-timeline-clip-id={clip.id}
                             draggable={selectedTool !== 'cut'}
                             key={clip.id}
@@ -3098,6 +3310,7 @@ export default function Editor({
 
                                 selectTimelineClip(clip);
                             }}
+                            onDrag={updateTimelineDragPosition}
                             onDragEnd={stopTimelineClipDrag}
                             onDragOver={(event) =>
                                 allowEffectDropOnClip(event, clip)
@@ -3402,7 +3615,7 @@ export default function Editor({
                         </div>
                     </header>
 
-                    <section className="grid flex-1 grid-cols-1 overflow-hidden lg:grid-cols-[320px_minmax(0,1fr)_300px] lg:grid-rows-[minmax(420px,1fr)_auto]">
+                    <section className="grid flex-1 grid-cols-1 lg:grid-cols-[320px_minmax(0,1fr)_300px] lg:grid-rows-[minmax(420px,1fr)_auto]">
                         <aside className="grid border-b border-zinc-800 bg-zinc-900/70 lg:row-span-2 lg:grid-rows-[minmax(0,1fr)_auto] lg:border-r lg:border-b-0">
                             <section className="min-h-0 p-4">
                                 <div className="mb-4 flex items-center justify-between gap-3">
@@ -3503,6 +3716,9 @@ export default function Editor({
                                                             event,
                                                             item,
                                                         )
+                                                    }
+                                                    onDrag={
+                                                        updateTimelineDragPosition
                                                     }
                                                     onDragEnd={stopMediaDrag}
                                                     title="Drag to the timeline"
@@ -3639,9 +3855,8 @@ export default function Editor({
                                     <button
                                         className="flex w-full items-center justify-between rounded border border-zinc-800 bg-zinc-950 px-3 py-2 text-left text-sm text-zinc-300 transition hover:border-cyan-500 hover:text-white"
                                         draggable
-                                        onDragEnd={() =>
-                                            setTimelineDropPreview(null)
-                                        }
+                                        onDrag={updateTimelineDragPosition}
+                                        onDragEnd={stopTextDrag}
                                         onDragStart={startTextDrag}
                                         type="button"
                                     >
@@ -3672,6 +3887,8 @@ export default function Editor({
                                             className="flex w-full cursor-grab items-center justify-between rounded border border-zinc-800 bg-zinc-950 px-3 py-2 text-left text-sm text-zinc-300 transition hover:border-cyan-500 hover:text-white active:cursor-grabbing"
                                             draggable
                                             key={effect.id}
+                                            onDrag={updateTimelineDragPosition}
+                                            onDragEnd={stopVfxDrag}
                                             onDragStart={(event) =>
                                                 startVfxDrag(event, effect.id)
                                             }
@@ -4688,7 +4905,9 @@ export default function Editor({
                                                             'video' ||
                                                             clip.type ===
                                                                 'image') &&
-                                                        clip.trackIndex === 1,
+                                                        getTimelineClipPreviewTrackIndex(
+                                                            clip,
+                                                        ) === 1,
                                                 )
                                                 .map((clip) => (
                                                     <button
@@ -4702,7 +4921,7 @@ export default function Editor({
                                                             clip.id
                                                                 ? 'ring-2 ring-cyan-300'
                                                                 : ''
-                                                        }`}
+                                                        } ${getTimelineClipMoveClass(clip)}`}
                                                         data-timeline-clip-id={
                                                             clip.id
                                                         }
@@ -4745,6 +4964,9 @@ export default function Editor({
                                                                 event,
                                                                 clip,
                                                             )
+                                                        }
+                                                        onDrag={
+                                                            updateTimelineDragPosition
                                                         }
                                                         onDragOver={(event) =>
                                                             allowEffectDropOnClip(
@@ -4817,7 +5039,9 @@ export default function Editor({
                                                             'video' ||
                                                             clip.type ===
                                                                 'image') &&
-                                                        clip.trackIndex === 1,
+                                                        getTimelineClipPreviewTrackIndex(
+                                                            clip,
+                                                        ) === 1,
                                                 )
                                                 .map((clip) => (
                                                     <div
@@ -4950,7 +5174,9 @@ export default function Editor({
                                                     (clip.type === 'video' ||
                                                         clip.type ===
                                                             'image') &&
-                                                    clip.trackIndex === 1,
+                                                    getTimelineClipPreviewTrackIndex(
+                                                        clip,
+                                                    ) === 1,
                                             ).length === 0 && (
                                                 <div className="flex h-14 items-center justify-center rounded border border-dashed border-zinc-800 text-xs text-zinc-600">
                                                     Drag video or images here
@@ -5002,7 +5228,9 @@ export default function Editor({
                                                 .filter(
                                                     (clip) =>
                                                         clip.type === 'text' &&
-                                                        clip.trackIndex === 1,
+                                                        getTimelineClipPreviewTrackIndex(
+                                                            clip,
+                                                        ) === 1,
                                                 )
                                                 .map((clip) => (
                                                     <button
@@ -5016,7 +5244,7 @@ export default function Editor({
                                                             clip.id
                                                                 ? 'ring-2 ring-cyan-300'
                                                                 : ''
-                                                        }`}
+                                                        } ${getTimelineClipMoveClass(clip)}`}
                                                         draggable={
                                                             selectedTool !==
                                                             'cut'
@@ -5056,6 +5284,9 @@ export default function Editor({
                                                                 event,
                                                                 clip,
                                                             )
+                                                        }
+                                                        onDrag={
+                                                            updateTimelineDragPosition
                                                         }
                                                         onDragEnd={
                                                             stopTimelineClipDrag
@@ -5141,7 +5372,9 @@ export default function Editor({
                                             {timelineClips.filter(
                                                 (clip) =>
                                                     clip.type === 'text' &&
-                                                    clip.trackIndex === 1,
+                                                    getTimelineClipPreviewTrackIndex(
+                                                        clip,
+                                                    ) === 1,
                                             ).length === 0 && (
                                                 <div className="flex h-9 items-center justify-center rounded border border-dashed border-zinc-800 text-xs text-zinc-600">
                                                     Drag text here
@@ -5199,7 +5432,9 @@ export default function Editor({
                                                 .filter(
                                                     (clip) =>
                                                         clip.type === 'audio' &&
-                                                        clip.trackIndex === 1,
+                                                        getTimelineClipPreviewTrackIndex(
+                                                            clip,
+                                                        ) === 1,
                                                 )
                                                 .map((clip) => (
                                                     <button
@@ -5213,7 +5448,7 @@ export default function Editor({
                                                             clip.id
                                                                 ? 'ring-2 ring-cyan-300'
                                                                 : ''
-                                                        }`}
+                                                        } ${getTimelineClipMoveClass(clip)}`}
                                                         draggable={
                                                             selectedTool !==
                                                             'cut'
@@ -5253,6 +5488,9 @@ export default function Editor({
                                                                 event,
                                                                 clip,
                                                             )
+                                                        }
+                                                        onDrag={
+                                                            updateTimelineDragPosition
                                                         }
                                                         onDragEnd={
                                                             stopTimelineClipDrag
@@ -5338,7 +5576,9 @@ export default function Editor({
                                             {timelineClips.filter(
                                                 (clip) =>
                                                     clip.type === 'audio' &&
-                                                    clip.trackIndex === 1,
+                                                    getTimelineClipPreviewTrackIndex(
+                                                        clip,
+                                                    ) === 1,
                                             ).length === 0 && (
                                                 <div className="flex h-9 items-center justify-center rounded border border-dashed border-zinc-800 text-xs text-zinc-600">
                                                     Drag audio here
