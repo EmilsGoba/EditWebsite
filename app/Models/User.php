@@ -47,6 +47,8 @@ class User extends Authenticatable
 
     /**
      * A user can own many video editing projects.
+     *
+     * @return HasMany<Project, $this>
      */
     public function projects(): HasMany
     {

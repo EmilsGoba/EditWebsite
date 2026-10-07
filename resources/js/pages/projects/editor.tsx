@@ -1,327 +1,62 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Head, Link, router } from '@inertiajs/react';
+import { Head, router } from '@inertiajs/react';
+import { Film, Image, Volume2 } from 'lucide-react';
+
+import { EditorTopBar } from '@/components/editor/editor-top-bar';
+import { ClipPropertiesPanel } from '@/components/editor/clip-properties-panel';
+import { MediaToolsPanel } from '@/components/editor/media-tools-panel';
+import { TimelineToolbar } from '@/components/editor/timeline-toolbar';
+
 import {
-    ArrowLeft,
-    Clapperboard,
-    Film,
-    Image,
-    MousePointer2,
-    Minus,
-    Pause,
-    Play,
-    Plus,
-    RotateCcw,
-    Redo2,
-    Save,
-    Scissors,
-    Sparkles,
-    Type,
-    Trash2,
-    Upload,
-    Undo2,
-    Volume2,
-} from 'lucide-react';
-
-import { Button } from '@/components/ui/button';
-
-type Project = {
-    id: number;
-    name: string;
-    format: string;
-    status: string;
-    created_at: string;
-};
-
-type EditorProps = {
-    project: Project;
-    media: ProjectMedia[];
-    timelineClips: SavedTimelineClip[];
-};
-
-type ProjectMedia = {
-    id: number;
-    type: 'video' | 'image' | 'audio';
-    name: string;
-    mime_type: string | null;
-    size: number;
-    url: string;
-    created_at: string;
-};
-
-type TimelineClipType = ProjectMedia['type'] | 'text';
-type ClipEffectId = 'blur' | 'glow' | 'invert-color';
-
-type ClipEffect = {
-    id: ClipEffectId;
-    start: number;
-    duration: number;
-};
-
-type TimelineClip = {
-    id: number;
-    mediaId: number | null;
-    name: string;
-    type: TimelineClipType;
-    trackIndex: number;
-    start: number;
-    duration: number;
-    sourceStart: number;
-    scale: number;
-    positionX: number;
-    positionY: number;
-    rotation: number;
-    previewWidth?: number | null;
-    previewHeight?: number | null;
-    effects: ClipEffect[];
-    color: string;
-    url: string | null;
-};
-
-type MediaDimensions = {
-    width: number;
-    height: number;
-};
-
-type SavedTimelineClip = Omit<
+    clipDragType,
+    defaultClipProperties,
+    defaultTimelineSeconds,
+    fixedAudioTrackCount,
+    getAllowedTimelineTrackIndex,
+    getClipEffectLabel,
+    getClipTrack,
+    getTemporaryClipDuration,
+    getTextClipContent,
+    getTimelineColor,
+    mediaDragType,
+    maxClipScale,
+    normalizeClipEffects,
+    pageDragScrollEdgePixels,
+    pageDragScrollMaxStepPixels,
+    pageDragScrollMinStepPixels,
+    snapToTimelineStep,
+    textDragType,
+    timelineBaseWidth,
+    timelineFrameDurationSeconds,
+    timelineFramesPerSecond,
+    timelineMajorIntervalSeconds,
+    timelineOverlapGapSeconds,
+    timelinePaddingSeconds,
+    timelinePlaybackIntervalMs,
+    vfxDragType,
+    vfxMinimumWidthPixels,
+    visibleTimelineIntervalSeconds,
+} from '@/lib/editor-timeline';
+import type {
+    ClipEffect,
+    ClipEffectId,
+    ClipTrimState,
+    CutPreview,
+    EditorProps,
+    EffectTrimState,
+    MediaDimensions,
+    PlayheadDragState,
+    PreviewMediaBounds,
+    ProjectMedia,
+    SelectedEffect,
+    TextPreviewDragState,
     TimelineClip,
-    'color' | 'effects' | 'positionX' | 'positionY' | 'rotation' | 'scale'
-> &
-    Partial<
-        Pick<TimelineClip, 'positionX' | 'positionY' | 'rotation' | 'scale'>
-    > & {
-        effects?: (ClipEffect | ClipEffectId)[] | null;
-    };
-
-type ClipTrimState = {
-    clipId: number;
-    edge: 'left' | 'right';
-    linkedClipIds: number[];
-    startingClips: TimelineClip[];
-    trackLeft: number;
-};
-
-type EffectTrimState = {
-    clipId: number;
-    effectIndex: number;
-    edge: 'left' | 'right';
-    startingClips: TimelineClip[];
-    trackLeft: number;
-};
-
-type SelectedEffect = {
-    clipId: number;
-    effectIndex: number;
-};
-
-type PlayheadDragState = {
-    trackLeft: number;
-};
-
-type TimelineDropPreview = {
-    track: TimelineTrack;
-    name: string;
-    type: TimelineClipType;
-    trackIndex: number;
-    start: number;
-    duration: number;
-    canPlace: boolean;
-};
-
-type TimelineTrack = 'video' | 'audio' | 'text';
-
-type TimelineClipMovePreview = {
-    clipId: number;
-    linkedClipIds: number[];
-    originalStart: number;
-    previewStart: number;
-    trackIndex: number;
-    canPlace: boolean;
-    offsetPixels: number;
-};
-
-type CutPreview = {
-    clipId: number;
-    time: number;
-};
-
-type TextPreviewDragState = {
-    clipId: number;
-    startClientX: number;
-    startClientY: number;
-    startPositionX: number;
-    startPositionY: number;
-    startingClips: TimelineClip[];
-};
-
-type VisualPreviewDragState = {
-    action: 'move' | 'scale';
-    clipId: number;
-    startClientX: number;
-    startClientY: number;
-    startPositionX: number;
-    startPositionY: number;
-    startScale: number;
-    startRotation: number;
-    mediaBounds: PreviewMediaBounds | null;
-    startingClips: TimelineClip[];
-};
-
-type PreviewMediaBounds = {
-    width: number;
-    height: number;
-    left: number;
-    top: number;
-};
-
-const uploadLimits =
-    'Allowed files: MP4, MOV, JPG, JPEG, PNG, MP3. Videos up to 500 MB, images up to 10 MB, audio up to 50 MB.';
-const acceptedMediaTypes = '.mp4,.mov,.jpg,.jpeg,.png,.mp3';
-const timelineBaseWidth = 1100;
-const defaultTimelineSeconds = 70;
-const timelinePaddingSeconds = 10;
-const timelineMajorIntervalSeconds = 10;
-const timelineFramesPerSecond = 60;
-const timelineFrameDurationSeconds = 1 / timelineFramesPerSecond;
-const timelinePlaybackIntervalMs = 1000 / timelineFramesPerSecond;
-const visibleTimelineIntervalSeconds = 0.1;
-const timelineOverlapGapSeconds = timelineFrameDurationSeconds;
-const maxClipScale = 1000;
-const fixedAudioTrackCount = 2;
-const vfxMinimumWidthPixels = 18;
-const pageDragScrollEdgePixels = 120;
-const pageDragScrollMinStepPixels = 3;
-const pageDragScrollMaxStepPixels = 12;
-const mediaDragType = 'application/x-video-editor-media';
-const clipDragType = 'application/x-video-editor-clip';
-const textDragType = 'application/x-video-editor-text';
-const clipEffects: { id: ClipEffectId; label: string }[] = [
-    {
-        id: 'invert-color',
-        label: 'Invert color',
-    },
-    {
-        id: 'blur',
-        label: 'Blur',
-    },
-    {
-        id: 'glow',
-        label: 'Glow',
-    },
-];
-const vfxDragType = 'application/x-video-editor-vfx';
-
-function snapToTimelineStep(seconds: number) {
-    // The editor timeline snaps to 60 FPS, so clips and the playhead always land on real frame boundaries.
-    const frame = Math.round(seconds * timelineFramesPerSecond);
-
-    return Number((frame / timelineFramesPerSecond).toFixed(6));
-}
-
-function getTextClipContent(name: string) {
-    return name.replace(/(?: cut)+$/i, '');
-}
-
-function getClipEffectLabel(effect: ClipEffectId) {
-    return (
-        clipEffects.find((clipEffect) => clipEffect.id === effect)?.label ??
-        effect
-    );
-}
-
-function normalizeClipEffects(
-    effects: (ClipEffect | ClipEffectId)[] | null | undefined,
-    clipDuration: number,
-): ClipEffect[] {
-    return (effects ?? [])
-        .map((effect) => {
-            if (typeof effect === 'string') {
-                return {
-                    id: effect,
-                    start: 0,
-                    duration: clipDuration,
-                };
-            }
-
-            return {
-                id: effect.id,
-                start: snapToTimelineStep(Math.max(0, effect.start)),
-                duration: snapToTimelineStep(
-                    Math.max(timelineFrameDurationSeconds, effect.duration),
-                ),
-            };
-        })
-        .filter(
-            (effect): effect is ClipEffect =>
-                clipEffects.some((clipEffect) => clipEffect.id === effect.id) &&
-                effect.start < clipDuration,
-        )
-        .map((effect) => ({
-            ...effect,
-            duration: Math.min(effect.duration, clipDuration - effect.start),
-        }));
-}
-
-function getClipTrack(clip: Pick<TimelineClip, 'type'>): TimelineTrack {
-    if (clip.type === 'audio') {
-        return 'audio';
-    }
-
-    if (clip.type === 'text') {
-        return 'text';
-    }
-
-    return 'video';
-}
-
-function getAllowedTimelineTrackIndex(
-    type: TimelineClipType,
-    trackIndex: number,
-) {
-    if (type === 'video' || type === 'image') {
-        return 1;
-    }
-
-    return Math.min(2, Math.max(1, trackIndex));
-}
-
-const defaultClipProperties = {
-    scale: 100,
-    positionX: 0,
-    positionY: 0,
-    rotation: 0,
-};
-
-function getTemporaryClipDuration(type: TimelineClipType) {
-    if (type === 'text') {
-        return 5;
-    }
-
-    if (type === 'image') {
-        return 5;
-    }
-
-    if (type === 'audio') {
-        return 12;
-    }
-
-    return 10;
-}
-
-function getTimelineColor(type: TimelineClipType) {
-    if (type === 'text') {
-        return 'bg-violet-600';
-    }
-
-    if (type === 'audio') {
-        return 'bg-emerald-700/80';
-    }
-
-    if (type === 'image') {
-        return 'bg-cyan-500';
-    }
-
-    return 'bg-orange-500';
-}
+    TimelineClipMovePreview,
+    TimelineClipType,
+    TimelineDropPreview,
+    TimelineTrack,
+    VisualPreviewDragState,
+} from '@/lib/editor-timeline';
 
 export default function Editor({
     project,
@@ -3526,383 +3261,48 @@ export default function Editor({
 
             <main className="min-h-full bg-zinc-950 text-zinc-100">
                 <div className="flex min-h-[calc(100vh-6.75rem)] flex-col">
-                    <header className="grid min-h-14 grid-cols-[1fr_auto_1fr] items-center border-b border-zinc-800 bg-zinc-950 px-4">
-                        <div className="flex min-w-0 items-center gap-3">
-                            <Button
-                                asChild
-                                variant="ghost"
-                                className="text-zinc-300 hover:bg-zinc-900 hover:text-white"
-                            >
-                                <Link href="/dashboard">
-                                    <ArrowLeft className="size-4" />
-                                    Projects
-                                </Link>
-                            </Button>
-                            <div className="hidden items-center gap-2 text-sm font-medium text-zinc-400 sm:flex">
-                                <Clapperboard className="size-4 text-cyan-400" />
-                                Editor
-                            </div>
-                        </div>
-
-                        <div className="min-w-0 text-center">
-                            <h1 className="truncate text-sm font-semibold text-white">
-                                {project.name}
-                            </h1>
-                            <p className="text-xs text-zinc-500">
-                                {project.format} · {project.status}
-                            </p>
-                        </div>
-
-                        <div className="flex items-center justify-end gap-2">
-                            <div className="hidden text-right text-xs sm:block">
-                                <p className="text-zinc-500">
-                                    {saveStatus === 'saved'
-                                        ? 'Saved'
-                                        : 'Unsaved changes'}
-                                </p>
-                                {saveError && (
-                                    <p className="max-w-60 truncate text-red-400">
-                                        {saveError}
-                                    </p>
-                                )}
-                            </div>
-                            <button
-                                aria-checked={isAutoSaveEnabled}
-                                className="flex items-center gap-2 rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-medium text-zinc-300 transition hover:border-zinc-700 hover:bg-zinc-900"
-                                onClick={() =>
-                                    setIsAutoSaveEnabled(
-                                        (currentValue) => !currentValue,
-                                    )
-                                }
-                                role="switch"
-                                type="button"
-                            >
-                                Auto save
-                                <span
-                                    className={`flex h-5 w-9 items-center rounded-full p-0.5 transition ${
-                                        isAutoSaveEnabled
-                                            ? 'bg-cyan-500'
-                                            : 'bg-zinc-800'
-                                    }`}
-                                >
-                                    <span
-                                        className={`h-4 w-4 rounded-full bg-white transition ${
-                                            isAutoSaveEnabled
-                                                ? 'translate-x-4'
-                                                : 'translate-x-0'
-                                        }`}
-                                    />
-                                </span>
-                            </button>
-                            <Button
-                                className="gap-2 border-zinc-700 bg-zinc-950 text-zinc-200 hover:bg-zinc-800"
-                                disabled={isSavingTimeline}
-                                onClick={() => saveTimeline()}
-                                type="button"
-                                variant="outline"
-                            >
-                                <Save className="size-4" />
-                                {isSavingTimeline ? 'Saving' : 'Save'}
-                            </Button>
-                            <Button
-                                asChild
-                                className="bg-cyan-500 text-zinc-950 hover:bg-cyan-400"
-                            >
-                                <Link href={`/projects/${project.id}/export`}>
-                                    Export
-                                </Link>
-                            </Button>
-                        </div>
-                    </header>
+                    <EditorTopBar
+                        isAutoSaveEnabled={isAutoSaveEnabled}
+                        isSavingTimeline={isSavingTimeline}
+                        onSaveTimeline={() => saveTimeline()}
+                        onToggleAutoSave={() =>
+                            setIsAutoSaveEnabled(
+                                (currentValue) => !currentValue,
+                            )
+                        }
+                        project={project}
+                        saveError={saveError}
+                        saveStatus={saveStatus}
+                    />
 
                     <section className="grid flex-1 grid-cols-1 lg:grid-cols-[320px_minmax(0,1fr)_300px] lg:grid-rows-[minmax(420px,1fr)_auto]">
-                        <aside className="grid border-b border-zinc-800 bg-zinc-900/70 lg:row-span-2 lg:grid-rows-[minmax(0,1fr)_auto] lg:border-r lg:border-b-0">
-                            <section className="min-h-0 p-4">
-                                <div className="mb-4 flex items-center justify-between gap-3">
-                                    <div>
-                                        <h2 className="text-sm font-semibold text-white">
-                                            Media Pool
-                                        </h2>
-                                        <p className="text-xs text-zinc-500">
-                                            Project files
-                                        </p>
-                                    </div>
-                                    <div className="flex items-center gap-2">
-                                        {isDeletingMedia && (
-                                            <Button
-                                                className="h-9 border-red-500/40 bg-red-500/10 px-3 text-xs text-red-100 hover:bg-red-500/20"
-                                                disabled={
-                                                    selectedMediaIds.length ===
-                                                    0
-                                                }
-                                                onClick={deleteSelectedMedia}
-                                                type="button"
-                                                variant="outline"
-                                            >
-                                                Delete
-                                            </Button>
-                                        )}
-                                        <Button
-                                            size="icon"
-                                            variant="outline"
-                                            className="border-zinc-700 bg-zinc-950 text-zinc-200 hover:bg-zinc-800"
-                                            disabled={media.length === 0}
-                                            onClick={toggleDeleteMediaMode}
-                                            title="Select media to delete"
-                                            type="button"
-                                        >
-                                            <Trash2 className="size-4" />
-                                            <span className="sr-only">
-                                                Select media to delete
-                                            </span>
-                                        </Button>
-                                        <Button
-                                            size="icon"
-                                            variant="outline"
-                                            className="border-zinc-700 bg-zinc-950 text-zinc-200 hover:bg-zinc-800"
-                                            disabled={isUploading}
-                                            onClick={openMediaPicker}
-                                            title={uploadLimits}
-                                            type="button"
-                                        >
-                                            <Upload className="size-4" />
-                                            <span className="sr-only">
-                                                Upload media
-                                            </span>
-                                        </Button>
-                                    </div>
-                                    <input
-                                        ref={fileInputRef}
-                                        accept={acceptedMediaTypes}
-                                        className="hidden"
-                                        onChange={uploadMedia}
-                                        type="file"
-                                    />
-                                </div>
-
-                                {uploadError && (
-                                    <p className="mb-3 rounded border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">
-                                        {uploadError}
-                                    </p>
-                                )}
-
-                                {media.length > 0 ? (
-                                    <div className="grid grid-cols-2 gap-3">
-                                        {media.map((item) => {
-                                            const MediaIcon = getMediaIcon(
-                                                item.type,
-                                            );
-
-                                            return (
-                                                <button
-                                                    className={`group relative cursor-grab overflow-hidden rounded-lg border bg-zinc-950 text-left transition hover:border-cyan-500 active:cursor-grabbing ${
-                                                        selectedMediaIds.includes(
-                                                            item.id,
-                                                        )
-                                                            ? 'border-cyan-500'
-                                                            : 'border-zinc-800'
-                                                    }`}
-                                                    draggable={!isDeletingMedia}
-                                                    key={item.id}
-                                                    onClick={() => {
-                                                        if (isDeletingMedia) {
-                                                            toggleSelectedMedia(
-                                                                item.id,
-                                                            );
-                                                        }
-                                                    }}
-                                                    onDragStart={(event) =>
-                                                        startMediaDrag(
-                                                            event,
-                                                            item,
-                                                        )
-                                                    }
-                                                    onDrag={
-                                                        updateTimelineDragPosition
-                                                    }
-                                                    onDragEnd={stopMediaDrag}
-                                                    title="Drag to the timeline"
-                                                    type="button"
-                                                >
-                                                    {isDeletingMedia && (
-                                                        <span className="absolute top-2 left-2 z-10 flex size-6 items-center justify-center rounded border border-zinc-600 bg-zinc-950/90">
-                                                            <input
-                                                                checked={selectedMediaIds.includes(
-                                                                    item.id,
-                                                                )}
-                                                                className="size-3.5 accent-cyan-500"
-                                                                onChange={() =>
-                                                                    toggleSelectedMedia(
-                                                                        item.id,
-                                                                    )
-                                                                }
-                                                                onClick={(
-                                                                    event,
-                                                                ) =>
-                                                                    event.stopPropagation()
-                                                                }
-                                                                type="checkbox"
-                                                            />
-                                                        </span>
-                                                    )}
-                                                    <span className="flex aspect-video items-center justify-center overflow-hidden bg-zinc-800">
-                                                        {item.type ===
-                                                        'image' ? (
-                                                            <img
-                                                                alt={item.name}
-                                                                className="size-full object-cover transition group-hover:scale-105"
-                                                                src={item.url}
-                                                            />
-                                                        ) : item.type ===
-                                                          'video' ? (
-                                                            <video
-                                                                className="size-full object-cover transition group-hover:scale-105"
-                                                                muted
-                                                                onLoadedMetadata={(
-                                                                    event,
-                                                                ) =>
-                                                                    rememberMediaDuration(
-                                                                        item.id,
-                                                                        event
-                                                                            .currentTarget
-                                                                            .duration,
-                                                                    )
-                                                                }
-                                                                playsInline
-                                                                preload="metadata"
-                                                                src={item.url}
-                                                            >
-                                                                <track kind="captions" />
-                                                            </video>
-                                                        ) : (
-                                                            <>
-                                                                <MediaIcon className="size-6 text-zinc-400 group-hover:text-cyan-400" />
-                                                                <audio
-                                                                    className="hidden"
-                                                                    onLoadedMetadata={(
-                                                                        event,
-                                                                    ) =>
-                                                                        rememberMediaDuration(
-                                                                            item.id,
-                                                                            event
-                                                                                .currentTarget
-                                                                                .duration,
-                                                                        )
-                                                                    }
-                                                                    preload="metadata"
-                                                                    src={
-                                                                        item.url
-                                                                    }
-                                                                />
-                                                            </>
-                                                        )}
-                                                    </span>
-                                                    <span className="block min-w-0 p-2">
-                                                        <span className="block truncate text-xs font-medium text-zinc-200">
-                                                            {item.name}
-                                                        </span>
-                                                        <span className="flex items-center justify-between gap-2 text-xs text-zinc-500">
-                                                            <span className="capitalize">
-                                                                {item.type}
-                                                            </span>
-                                                            <span>
-                                                                {mediaDurations[
-                                                                    item.id
-                                                                ]
-                                                                    ? formatShortDuration(
-                                                                          mediaDurations[
-                                                                              item
-                                                                                  .id
-                                                                          ],
-                                                                      )
-                                                                    : formatFileSize(
-                                                                          item.size,
-                                                                      )}
-                                                            </span>
-                                                        </span>
-                                                    </span>
-                                                </button>
-                                            );
-                                        })}
-                                    </div>
-                                ) : (
-                                    <div className="rounded-lg border border-dashed border-zinc-800 bg-zinc-950 px-4 py-8 text-center">
-                                        <Upload className="mx-auto mb-3 size-6 text-zinc-500" />
-                                        <p className="text-sm font-medium text-zinc-300">
-                                            No media uploaded yet
-                                        </p>
-                                        <p className="mt-1 text-xs leading-5 text-zinc-500">
-                                            {uploadLimits}
-                                        </p>
-                                    </div>
-                                )}
-                            </section>
-
-                            <section className="border-t border-zinc-800 p-4">
-                                <div className="mb-4 flex items-center gap-2">
-                                    <Type className="size-4 text-cyan-400" />
-                                    <div>
-                                        <h2 className="text-sm font-semibold text-white">
-                                            Text
-                                        </h2>
-                                        <p className="text-xs text-zinc-500">
-                                            Temporary text tools
-                                        </p>
-                                    </div>
-                                </div>
-
-                                <div className="space-y-2">
-                                    <button
-                                        className="flex w-full items-center justify-between rounded border border-zinc-800 bg-zinc-950 px-3 py-2 text-left text-sm text-zinc-300 transition hover:border-cyan-500 hover:text-white"
-                                        draggable
-                                        onDrag={updateTimelineDragPosition}
-                                        onDragEnd={stopTextDrag}
-                                        onDragStart={startTextDrag}
-                                        type="button"
-                                    >
-                                        <span>Text</span>
-                                        <span className="text-xs text-zinc-600">
-                                            TXT
-                                        </span>
-                                    </button>
-                                </div>
-                            </section>
-
-                            <section className="border-t border-zinc-800 p-4">
-                                <div className="mb-4 flex items-center gap-2">
-                                    <Sparkles className="size-4 text-cyan-400" />
-                                    <div>
-                                        <h2 className="text-sm font-semibold text-white">
-                                            VFX
-                                        </h2>
-                                        <p className="text-xs text-zinc-500">
-                                            Temporary clip effects
-                                        </p>
-                                    </div>
-                                </div>
-
-                                <div className="space-y-2">
-                                    {clipEffects.map((effect) => (
-                                        <button
-                                            className="flex w-full cursor-grab items-center justify-between rounded border border-zinc-800 bg-zinc-950 px-3 py-2 text-left text-sm text-zinc-300 transition hover:border-cyan-500 hover:text-white active:cursor-grabbing"
-                                            draggable
-                                            key={effect.id}
-                                            onDrag={updateTimelineDragPosition}
-                                            onDragEnd={stopVfxDrag}
-                                            onDragStart={(event) =>
-                                                startVfxDrag(event, effect.id)
-                                            }
-                                            type="button"
-                                        >
-                                            <span>{effect.label}</span>
-                                            <span className="text-xs text-zinc-600">
-                                                FX
-                                            </span>
-                                        </button>
-                                    ))}
-                                </div>
-                            </section>
-                        </aside>
+                        <MediaToolsPanel
+                            fileInputRef={fileInputRef}
+                            formatFileSize={formatFileSize}
+                            formatShortDuration={formatShortDuration}
+                            getMediaIcon={getMediaIcon}
+                            isDeletingMedia={isDeletingMedia}
+                            isUploading={isUploading}
+                            media={media}
+                            mediaDurations={mediaDurations}
+                            onDeleteSelectedMedia={deleteSelectedMedia}
+                            onMediaDrag={updateTimelineDragPosition}
+                            onMediaDragEnd={stopMediaDrag}
+                            onMediaDragStart={startMediaDrag}
+                            onOpenMediaPicker={openMediaPicker}
+                            onTextDrag={updateTimelineDragPosition}
+                            onTextDragEnd={stopTextDrag}
+                            onTextDragStart={startTextDrag}
+                            onToggleDeleteMediaMode={toggleDeleteMediaMode}
+                            onToggleSelectedMedia={toggleSelectedMedia}
+                            onUploadMedia={uploadMedia}
+                            onVfxDrag={updateTimelineDragPosition}
+                            onVfxDragEnd={stopVfxDrag}
+                            onVfxDragStart={startVfxDrag}
+                            rememberMediaDuration={rememberMediaDuration}
+                            selectedMediaIds={selectedMediaIds}
+                            uploadError={uploadError}
+                        />
 
                         <section className="flex items-center justify-center border-b border-zinc-800 bg-zinc-950 p-5 lg:border-r">
                             <div className="flex aspect-video w-full items-center justify-center overflow-hidden rounded bg-black shadow-2xl">
@@ -4106,662 +3506,50 @@ export default function Editor({
                             </div>
                         </section>
 
-                        <aside className="border-b border-zinc-800 bg-zinc-900/70 p-4">
-                            <div className="flex items-start justify-between gap-3">
-                                <div>
-                                    <h2 className="text-sm font-semibold text-white">
-                                        {selectedTextClip ? 'Text' : 'Resize'}
-                                    </h2>
-                                    <p className="mt-1 text-xs text-zinc-500">
-                                        {selectedTextClip
-                                            ? 'Text clip settings'
-                                            : selectedVisualClip
-                                              ? selectedVisualClip.name
-                                              : 'Select a video, image, or text clip'}
-                                    </p>
-                                </div>
-                                {selectedTextClip ? (
-                                    <Button
-                                        className="h-8 gap-2 border-zinc-700 bg-zinc-950 px-3 text-xs text-zinc-200 hover:bg-zinc-800"
-                                        onClick={resetTextControls}
-                                        type="button"
-                                        variant="outline"
-                                    >
-                                        <RotateCcw className="size-3.5" />
-                                        Reset
-                                    </Button>
-                                ) : (
-                                    <Button
-                                        className="h-8 gap-2 border-zinc-700 bg-zinc-950 px-3 text-xs text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
-                                        disabled={!selectedVisualClip}
-                                        onClick={resetResizeControls}
-                                        type="button"
-                                        variant="outline"
-                                    >
-                                        <RotateCcw className="size-3.5" />
-                                        Reset
-                                    </Button>
-                                )}
-                            </div>
-
-                            {selectedTextClip ? (
-                                <div className="mt-4 space-y-4">
-                                    <label className="block text-xs text-zinc-400">
-                                        Text content
-                                        <textarea
-                                            className="mt-2 min-h-28 w-full resize-none rounded border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 transition outline-none focus:border-cyan-500"
-                                            onChange={(event) =>
-                                                updateSelectedTextClipName(
-                                                    event.target.value,
-                                                )
-                                            }
-                                            placeholder="Write your text..."
-                                            value={selectedTextClip.name}
-                                        />
-                                    </label>
-
-                                    <label className="block text-xs text-zinc-400">
-                                        <span className="flex items-center justify-between gap-3">
-                                            Size
-                                            <span className="flex items-center gap-1">
-                                                <input
-                                                    className="h-8 w-20 rounded border border-zinc-700 bg-zinc-950 px-2 font-mono text-xs text-zinc-100 outline-none focus:border-cyan-500"
-                                                    max={maxClipScale}
-                                                    min="40"
-                                                    onChange={(event) =>
-                                                        updateSelectedTextClipProperty(
-                                                            'scale',
-                                                            Number(
-                                                                event.target
-                                                                    .value,
-                                                            ),
-                                                        )
-                                                    }
-                                                    type="number"
-                                                    value={
-                                                        selectedTextClip.scale
-                                                    }
-                                                />
-                                                <span className="text-zinc-500">
-                                                    %
-                                                </span>
-                                                <button
-                                                    className="ml-1 flex size-8 items-center justify-center rounded border border-zinc-700 bg-zinc-950 text-zinc-400 transition hover:border-cyan-500 hover:text-white"
-                                                    onClick={() =>
-                                                        updateSelectedTextClipProperty(
-                                                            'scale',
-                                                            100,
-                                                        )
-                                                    }
-                                                    title="Reset size"
-                                                    type="button"
-                                                >
-                                                    <RotateCcw className="size-3.5" />
-                                                </button>
-                                            </span>
-                                        </span>
-                                        <input
-                                            className="mt-2 w-full accent-cyan-500"
-                                            max={maxClipScale}
-                                            min="40"
-                                            onChange={(event) =>
-                                                updateSelectedTextClipProperty(
-                                                    'scale',
-                                                    Number(event.target.value),
-                                                )
-                                            }
-                                            type="range"
-                                            value={selectedTextClip.scale}
-                                        />
-                                    </label>
-
-                                    <label className="block text-xs text-zinc-400">
-                                        <span className="flex items-center justify-between gap-3">
-                                            Position X
-                                            <span className="flex items-center gap-1">
-                                                <input
-                                                    className="h-8 w-20 rounded border border-zinc-700 bg-zinc-950 px-2 font-mono text-xs text-zinc-100 outline-none focus:border-cyan-500"
-                                                    max="1000"
-                                                    min="-1000"
-                                                    onChange={(event) =>
-                                                        updateSelectedTextClipProperty(
-                                                            'positionX',
-                                                            Number(
-                                                                event.target
-                                                                    .value,
-                                                            ),
-                                                        )
-                                                    }
-                                                    type="number"
-                                                    value={
-                                                        selectedTextClip.positionX
-                                                    }
-                                                />
-                                                <span className="text-zinc-500">
-                                                    px
-                                                </span>
-                                                <button
-                                                    className="ml-1 flex size-8 items-center justify-center rounded border border-zinc-700 bg-zinc-950 text-zinc-400 transition hover:border-cyan-500 hover:text-white"
-                                                    onClick={() =>
-                                                        updateSelectedTextClipProperty(
-                                                            'positionX',
-                                                            0,
-                                                        )
-                                                    }
-                                                    title="Reset position X"
-                                                    type="button"
-                                                >
-                                                    <RotateCcw className="size-3.5" />
-                                                </button>
-                                            </span>
-                                        </span>
-                                        <input
-                                            className="mt-2 w-full accent-cyan-500"
-                                            max="1000"
-                                            min="-1000"
-                                            onChange={(event) =>
-                                                updateSelectedTextClipProperty(
-                                                    'positionX',
-                                                    Number(event.target.value),
-                                                )
-                                            }
-                                            type="range"
-                                            value={selectedTextClip.positionX}
-                                        />
-                                    </label>
-
-                                    <label className="block text-xs text-zinc-400">
-                                        <span className="flex items-center justify-between gap-3">
-                                            Position Y
-                                            <span className="flex items-center gap-1">
-                                                <input
-                                                    className="h-8 w-20 rounded border border-zinc-700 bg-zinc-950 px-2 font-mono text-xs text-zinc-100 outline-none focus:border-cyan-500"
-                                                    max="1000"
-                                                    min="-1000"
-                                                    onChange={(event) =>
-                                                        updateSelectedTextClipProperty(
-                                                            'positionY',
-                                                            Number(
-                                                                event.target
-                                                                    .value,
-                                                            ),
-                                                        )
-                                                    }
-                                                    type="number"
-                                                    value={
-                                                        selectedTextClip.positionY
-                                                    }
-                                                />
-                                                <span className="text-zinc-500">
-                                                    px
-                                                </span>
-                                                <button
-                                                    className="ml-1 flex size-8 items-center justify-center rounded border border-zinc-700 bg-zinc-950 text-zinc-400 transition hover:border-cyan-500 hover:text-white"
-                                                    onClick={() =>
-                                                        updateSelectedTextClipProperty(
-                                                            'positionY',
-                                                            0,
-                                                        )
-                                                    }
-                                                    title="Reset position Y"
-                                                    type="button"
-                                                >
-                                                    <RotateCcw className="size-3.5" />
-                                                </button>
-                                            </span>
-                                        </span>
-                                        <input
-                                            className="mt-2 w-full accent-cyan-500"
-                                            max="1000"
-                                            min="-1000"
-                                            onChange={(event) =>
-                                                updateSelectedTextClipProperty(
-                                                    'positionY',
-                                                    Number(event.target.value),
-                                                )
-                                            }
-                                            type="range"
-                                            value={selectedTextClip.positionY}
-                                        />
-                                    </label>
-
-                                    <label className="block text-xs text-zinc-400">
-                                        <span className="flex items-center justify-between gap-3">
-                                            Rotation
-                                            <span className="flex items-center gap-1">
-                                                <input
-                                                    className="h-8 w-20 rounded border border-zinc-700 bg-zinc-950 px-2 font-mono text-xs text-zinc-100 outline-none focus:border-cyan-500"
-                                                    max="180"
-                                                    min="-180"
-                                                    onChange={(event) =>
-                                                        updateSelectedTextClipProperty(
-                                                            'rotation',
-                                                            Number(
-                                                                event.target
-                                                                    .value,
-                                                            ),
-                                                        )
-                                                    }
-                                                    type="number"
-                                                    value={
-                                                        selectedTextClip.rotation
-                                                    }
-                                                />
-                                                <span className="text-zinc-500">
-                                                    deg
-                                                </span>
-                                                <button
-                                                    className="ml-1 flex size-8 items-center justify-center rounded border border-zinc-700 bg-zinc-950 text-zinc-400 transition hover:border-cyan-500 hover:text-white"
-                                                    onClick={() =>
-                                                        updateSelectedTextClipProperty(
-                                                            'rotation',
-                                                            0,
-                                                        )
-                                                    }
-                                                    title="Reset rotation"
-                                                    type="button"
-                                                >
-                                                    <RotateCcw className="size-3.5" />
-                                                </button>
-                                            </span>
-                                        </span>
-                                        <input
-                                            className="mt-2 w-full accent-cyan-500"
-                                            max="180"
-                                            min="-180"
-                                            onChange={(event) =>
-                                                updateSelectedTextClipProperty(
-                                                    'rotation',
-                                                    Number(event.target.value),
-                                                )
-                                            }
-                                            type="range"
-                                            value={selectedTextClip.rotation}
-                                        />
-                                    </label>
-                                </div>
-                            ) : (
-                                <div className="mt-4 space-y-4">
-                                    <label className="block text-xs text-zinc-400">
-                                        <span className="flex items-center justify-between gap-3">
-                                            Scale
-                                            <span className="flex items-center gap-1">
-                                                <input
-                                                    className="h-8 w-20 rounded border border-zinc-700 bg-zinc-950 px-2 font-mono text-xs text-zinc-100 outline-none focus:border-cyan-500 disabled:opacity-50"
-                                                    disabled={
-                                                        !selectedVisualClip
-                                                    }
-                                                    max="160"
-                                                    min="40"
-                                                    onChange={(event) =>
-                                                        updateSelectedClipProperty(
-                                                            'scale',
-                                                            Number(
-                                                                event.target
-                                                                    .value,
-                                                            ),
-                                                        )
-                                                    }
-                                                    type="number"
-                                                    value={selectedClipScale}
-                                                />
-                                                <span className="text-zinc-500">
-                                                    %
-                                                </span>
-                                                <button
-                                                    className="ml-1 flex size-8 items-center justify-center rounded border border-zinc-700 bg-zinc-950 text-zinc-400 transition hover:border-cyan-500 hover:text-white disabled:opacity-50"
-                                                    disabled={
-                                                        !selectedVisualClip
-                                                    }
-                                                    onClick={() =>
-                                                        updateSelectedClipProperty(
-                                                            'scale',
-                                                            100,
-                                                        )
-                                                    }
-                                                    title="Reset scale"
-                                                    type="button"
-                                                >
-                                                    <RotateCcw className="size-3.5" />
-                                                </button>
-                                            </span>
-                                        </span>
-                                        <input
-                                            className="mt-2 w-full accent-cyan-500 disabled:opacity-50"
-                                            disabled={!selectedVisualClip}
-                                            max="160"
-                                            min="40"
-                                            onChange={(event) =>
-                                                updateSelectedClipProperty(
-                                                    'scale',
-                                                    Number(event.target.value),
-                                                )
-                                            }
-                                            type="range"
-                                            value={selectedClipScale}
-                                        />
-                                    </label>
-
-                                    <label className="block text-xs text-zinc-400">
-                                        <span className="flex items-center justify-between gap-3">
-                                            Position X
-                                            <span className="flex items-center gap-1">
-                                                <input
-                                                    className="h-8 w-20 rounded border border-zinc-700 bg-zinc-950 px-2 font-mono text-xs text-zinc-100 outline-none focus:border-cyan-500 disabled:opacity-50"
-                                                    disabled={
-                                                        !selectedVisualClip
-                                                    }
-                                                    max="100"
-                                                    min="-100"
-                                                    onChange={(event) =>
-                                                        updateSelectedClipProperty(
-                                                            'positionX',
-                                                            Number(
-                                                                event.target
-                                                                    .value,
-                                                            ),
-                                                        )
-                                                    }
-                                                    type="number"
-                                                    value={
-                                                        selectedClipPositionX
-                                                    }
-                                                />
-                                                <span className="text-zinc-500">
-                                                    px
-                                                </span>
-                                                <button
-                                                    className="ml-1 flex size-8 items-center justify-center rounded border border-zinc-700 bg-zinc-950 text-zinc-400 transition hover:border-cyan-500 hover:text-white disabled:opacity-50"
-                                                    disabled={
-                                                        !selectedVisualClip
-                                                    }
-                                                    onClick={() =>
-                                                        updateSelectedClipProperty(
-                                                            'positionX',
-                                                            0,
-                                                        )
-                                                    }
-                                                    title="Reset position X"
-                                                    type="button"
-                                                >
-                                                    <RotateCcw className="size-3.5" />
-                                                </button>
-                                            </span>
-                                        </span>
-                                        <input
-                                            className="mt-2 w-full accent-cyan-500 disabled:opacity-50"
-                                            disabled={!selectedVisualClip}
-                                            max="100"
-                                            min="-100"
-                                            onChange={(event) =>
-                                                updateSelectedClipProperty(
-                                                    'positionX',
-                                                    Number(event.target.value),
-                                                )
-                                            }
-                                            type="range"
-                                            value={selectedClipPositionX}
-                                        />
-                                    </label>
-
-                                    <label className="block text-xs text-zinc-400">
-                                        <span className="flex items-center justify-between gap-3">
-                                            Position Y
-                                            <span className="flex items-center gap-1">
-                                                <input
-                                                    className="h-8 w-20 rounded border border-zinc-700 bg-zinc-950 px-2 font-mono text-xs text-zinc-100 outline-none focus:border-cyan-500 disabled:opacity-50"
-                                                    disabled={
-                                                        !selectedVisualClip
-                                                    }
-                                                    max="100"
-                                                    min="-100"
-                                                    onChange={(event) =>
-                                                        updateSelectedClipProperty(
-                                                            'positionY',
-                                                            Number(
-                                                                event.target
-                                                                    .value,
-                                                            ),
-                                                        )
-                                                    }
-                                                    type="number"
-                                                    value={
-                                                        selectedClipPositionY
-                                                    }
-                                                />
-                                                <span className="text-zinc-500">
-                                                    px
-                                                </span>
-                                                <button
-                                                    className="ml-1 flex size-8 items-center justify-center rounded border border-zinc-700 bg-zinc-950 text-zinc-400 transition hover:border-cyan-500 hover:text-white disabled:opacity-50"
-                                                    disabled={
-                                                        !selectedVisualClip
-                                                    }
-                                                    onClick={() =>
-                                                        updateSelectedClipProperty(
-                                                            'positionY',
-                                                            0,
-                                                        )
-                                                    }
-                                                    title="Reset position Y"
-                                                    type="button"
-                                                >
-                                                    <RotateCcw className="size-3.5" />
-                                                </button>
-                                            </span>
-                                        </span>
-                                        <input
-                                            className="mt-2 w-full accent-cyan-500 disabled:opacity-50"
-                                            disabled={!selectedVisualClip}
-                                            max="100"
-                                            min="-100"
-                                            onChange={(event) =>
-                                                updateSelectedClipProperty(
-                                                    'positionY',
-                                                    Number(event.target.value),
-                                                )
-                                            }
-                                            type="range"
-                                            value={selectedClipPositionY}
-                                        />
-                                    </label>
-
-                                    <label className="block text-xs text-zinc-400">
-                                        <span className="flex items-center justify-between gap-3">
-                                            Rotation
-                                            <span className="flex items-center gap-1">
-                                                <input
-                                                    className="h-8 w-20 rounded border border-zinc-700 bg-zinc-950 px-2 font-mono text-xs text-zinc-100 outline-none focus:border-cyan-500 disabled:opacity-50"
-                                                    disabled={
-                                                        !selectedVisualClip
-                                                    }
-                                                    max="180"
-                                                    min="-180"
-                                                    onChange={(event) =>
-                                                        updateSelectedClipProperty(
-                                                            'rotation',
-                                                            Number(
-                                                                event.target
-                                                                    .value,
-                                                            ),
-                                                        )
-                                                    }
-                                                    type="number"
-                                                    value={selectedClipRotation}
-                                                />
-                                                <span className="text-zinc-500">
-                                                    deg
-                                                </span>
-                                                <button
-                                                    className="ml-1 flex size-8 items-center justify-center rounded border border-zinc-700 bg-zinc-950 text-zinc-400 transition hover:border-cyan-500 hover:text-white disabled:opacity-50"
-                                                    disabled={
-                                                        !selectedVisualClip
-                                                    }
-                                                    onClick={() =>
-                                                        updateSelectedClipProperty(
-                                                            'rotation',
-                                                            0,
-                                                        )
-                                                    }
-                                                    title="Reset rotation"
-                                                    type="button"
-                                                >
-                                                    <RotateCcw className="size-3.5" />
-                                                </button>
-                                            </span>
-                                        </span>
-                                        <input
-                                            className="mt-2 w-full accent-cyan-500 disabled:opacity-50"
-                                            disabled={!selectedVisualClip}
-                                            max="180"
-                                            min="-180"
-                                            onChange={(event) =>
-                                                updateSelectedClipProperty(
-                                                    'rotation',
-                                                    Number(event.target.value),
-                                                )
-                                            }
-                                            type="range"
-                                            value={selectedClipRotation}
-                                        />
-                                    </label>
-                                </div>
-                            )}
-                        </aside>
+                        <ClipPropertiesPanel
+                            onResetResizeControls={resetResizeControls}
+                            onResetTextControls={resetTextControls}
+                            onUpdateSelectedClipProperty={
+                                updateSelectedClipProperty
+                            }
+                            onUpdateSelectedTextClipName={
+                                updateSelectedTextClipName
+                            }
+                            onUpdateSelectedTextClipProperty={
+                                updateSelectedTextClipProperty
+                            }
+                            selectedClipPositionX={selectedClipPositionX}
+                            selectedClipPositionY={selectedClipPositionY}
+                            selectedClipRotation={selectedClipRotation}
+                            selectedClipScale={selectedClipScale}
+                            selectedTextClip={selectedTextClip}
+                            selectedVisualClip={selectedVisualClip}
+                        />
 
                         <section className="bg-zinc-900 lg:col-span-2">
-                            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800 px-4 py-3">
-                                <div className="flex items-center gap-2">
-                                    <Button
-                                        size="icon"
-                                        onClick={togglePlayback}
-                                        type="button"
-                                    >
-                                        {isPlaying ? (
-                                            <Pause className="size-4" />
-                                        ) : (
-                                            <Play className="size-4" />
-                                        )}
-                                        <span className="sr-only">
-                                            Toggle playback
-                                        </span>
-                                    </Button>
-                                    <span className="font-mono text-sm text-zinc-400">
-                                        {formatTimelineTime(playhead)}
-                                    </span>
-                                </div>
-
-                                <div className="flex items-center gap-2">
-                                    <Button
-                                        size="icon"
-                                        variant="outline"
-                                        className="border-zinc-700 bg-zinc-950 text-zinc-200 hover:bg-zinc-800"
-                                        disabled={historyIndex === 0}
-                                        onClick={undoTemporaryChange}
-                                        title="Undo"
-                                        type="button"
-                                    >
-                                        <Undo2 className="size-4" />
-                                        <span className="sr-only">Undo</span>
-                                    </Button>
-                                    <Button
-                                        size="icon"
-                                        variant="outline"
-                                        className="border-zinc-700 bg-zinc-950 text-zinc-200 hover:bg-zinc-800"
-                                        disabled={
-                                            historyIndex >= history.length - 1
-                                        }
-                                        onClick={redoTemporaryChange}
-                                        title="Redo"
-                                        type="button"
-                                    >
-                                        <Redo2 className="size-4" />
-                                        <span className="sr-only">Redo</span>
-                                    </Button>
-                                    <Button
-                                        variant={
-                                            selectedTool === 'select'
-                                                ? 'default'
-                                                : 'outline'
-                                        }
-                                        onClick={() => selectTool('select')}
-                                    >
-                                        <MousePointer2 className="size-4" />
-                                        Select
-                                    </Button>
-                                    <Button
-                                        variant={
-                                            selectedTool === 'cut'
-                                                ? 'default'
-                                                : 'outline'
-                                        }
-                                        onClick={() => selectTool('cut')}
-                                    >
-                                        <Scissors className="size-4" />
-                                        Cut
-                                    </Button>
-                                    <Button
-                                        variant="outline"
-                                        className="border-zinc-700 bg-zinc-950 text-zinc-200 hover:bg-zinc-800"
-                                        disabled={
-                                            !selectedClipId && !selectedEffect
-                                        }
-                                        onClick={deleteSelectedTimelineClip}
-                                        title={
-                                            selectedEffect
-                                                ? 'Delete selected VFX'
-                                                : 'Delete selected timeline clip'
-                                        }
-                                        type="button"
-                                    >
-                                        <Trash2 className="size-4" />
-                                        Delete
-                                    </Button>
-                                </div>
-
-                                <label className="flex items-center gap-2">
-                                    <span className="sr-only">
-                                        Timeline zoom
-                                    </span>
-                                    <Button
-                                        size="icon"
-                                        variant="outline"
-                                        className="size-8 border-zinc-700 bg-zinc-950 text-zinc-200 hover:bg-zinc-800"
-                                        onClick={() => changeTimelineZoom(-50)}
-                                        title="Zoom out"
-                                        type="button"
-                                    >
-                                        <Minus className="size-4" />
-                                        <span className="sr-only">
-                                            Zoom out
-                                        </span>
-                                    </Button>
-                                    <input
-                                        className="w-32 accent-cyan-500"
-                                        max="1000"
-                                        min="0"
-                                        onChange={(event) =>
-                                            setTimelineZoom(
-                                                Number(event.target.value),
-                                            )
-                                        }
-                                        step="10"
-                                        type="range"
-                                        value={timelineZoom}
-                                    />
-                                    <Button
-                                        size="icon"
-                                        variant="outline"
-                                        className="size-8 border-zinc-700 bg-zinc-950 text-zinc-200 hover:bg-zinc-800"
-                                        onClick={() => changeTimelineZoom(50)}
-                                        title="Zoom in"
-                                        type="button"
-                                    >
-                                        <Plus className="size-4" />
-                                        <span className="sr-only">Zoom in</span>
-                                    </Button>
-                                </label>
-                            </div>
+                            <TimelineToolbar
+                                canDeleteSelection={
+                                    !!selectedClipId || !!selectedEffect
+                                }
+                                canRedo={historyIndex < history.length - 1}
+                                canUndo={historyIndex > 0}
+                                isPlaying={isPlaying}
+                                onChangeZoom={changeTimelineZoom}
+                                onDeleteSelection={deleteSelectedTimelineClip}
+                                onRedo={redoTemporaryChange}
+                                onSelectTool={selectTool}
+                                onSetZoom={setTimelineZoom}
+                                onTogglePlayback={togglePlayback}
+                                onUndo={undoTemporaryChange}
+                                playheadLabel={formatTimelineTime(playhead)}
+                                selectedTool={selectedTool}
+                                selectionDeleteTitle={
+                                    selectedEffect
+                                        ? 'Delete selected VFX'
+                                        : 'Delete selected timeline clip'
+                                }
+                                timelineZoom={timelineZoom}
+                            />
 
                             <div
                                 ref={timelineScrollRef}

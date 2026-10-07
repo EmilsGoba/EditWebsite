@@ -25,6 +25,8 @@ class ProjectMedia extends Model
 {
     /**
      * Each uploaded media file belongs to one editing project.
+     *
+     * @return BelongsTo<Project, $this>
      */
     public function project(): BelongsTo
     {
@@ -33,6 +35,8 @@ class ProjectMedia extends Model
 
     /**
      * One uploaded media file can be used by multiple saved timeline clips.
+     *
+     * @return HasMany<ProjectTimelineClip, $this>
      */
     public function timelineClips(): HasMany
     {

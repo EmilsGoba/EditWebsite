@@ -27,6 +27,8 @@ class Project extends Model
 
     /**
      * Each project belongs to one user account.
+     *
+     * @return BelongsTo<User, $this>
      */
     public function user(): BelongsTo
     {
@@ -35,6 +37,8 @@ class Project extends Model
 
     /**
      * A project can contain many uploaded video, image, and audio files.
+     *
+     * @return HasMany<ProjectMedia, $this>
      */
     public function media(): HasMany
     {
@@ -43,6 +47,8 @@ class Project extends Model
 
     /**
      * A project can save the current clips placed on the timeline.
+     *
+     * @return HasMany<ProjectTimelineClip, $this>
      */
     public function timelineClips(): HasMany
     {
