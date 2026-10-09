@@ -20,6 +20,8 @@ type MediaToolsPanelProps = {
     media: ProjectMedia[];
     mediaDurations: Record<number, number>;
     onDeleteSelectedMedia: () => void;
+    onMediaPoolDragOver: (event: DragEvent<HTMLElement>) => void;
+    onMediaPoolDrop: (event: DragEvent<HTMLElement>) => void;
     onMediaDrag: (event: DragEvent<HTMLButtonElement>) => void;
     onMediaDragEnd: () => void;
     onMediaDragStart: (
@@ -54,6 +56,8 @@ export function MediaToolsPanel({
     media,
     mediaDurations,
     onDeleteSelectedMedia,
+    onMediaPoolDragOver,
+    onMediaPoolDrop,
     onMediaDrag,
     onMediaDragEnd,
     onMediaDragStart,
@@ -73,7 +77,11 @@ export function MediaToolsPanel({
 }: MediaToolsPanelProps) {
     return (
         <aside className="grid border-b border-zinc-800 bg-zinc-900/70 lg:row-span-2 lg:grid-rows-[minmax(0,1fr)_auto] lg:border-r lg:border-b-0">
-            <section className="min-h-0 p-4">
+            <section
+                className="min-h-0 p-4"
+                onDragOver={onMediaPoolDragOver}
+                onDrop={onMediaPoolDrop}
+            >
                 <div className="mb-4 flex items-center justify-between gap-3">
                     <div>
                         <h2 className="text-sm font-semibold text-white">
@@ -124,6 +132,7 @@ export function MediaToolsPanel({
                         ref={fileInputRef}
                         accept={acceptedMediaTypes}
                         className="hidden"
+                        multiple
                         onChange={onUploadMedia}
                         type="file"
                     />
@@ -247,10 +256,10 @@ export function MediaToolsPanel({
                         })}
                     </div>
                 ) : (
-                    <div className="rounded-lg border border-dashed border-zinc-800 bg-zinc-950 px-4 py-8 text-center">
+                    <div className="rounded-lg border border-dashed border-zinc-800 bg-zinc-950 px-4 py-8 text-center transition hover:border-cyan-500">
                         <Upload className="mx-auto mb-3 size-6 text-zinc-500" />
                         <p className="text-sm font-medium text-zinc-300">
-                            No media uploaded yet
+                            Drop media files here
                         </p>
                         <p className="mt-1 text-xs leading-5 text-zinc-500">
                             {uploadLimits}

@@ -2865,43 +2865,92 @@ export default function Editor({
         fileInputRef.current?.click();
     }
 
-    function uploadMedia(event: React.ChangeEvent<HTMLInputElement>) {
-        const file = event.target.files?.[0];
+    function uploadMediaFiles(files: FileList | File[]) {
+        const filesToUpload = Array.from(files);
 
-        if (!file) {
+        if (filesToUpload.length === 0) {
             return;
         }
 
-        const type = getMediaType(file);
+        const unsupportedFile = filesToUpload.find(
+            (file) => !getMediaType(file),
+        );
 
-        if (!type) {
+        if (unsupportedFile) {
             setUploadError('Please upload a video, image, or audio file.');
-            event.target.value = '';
             return;
         }
 
         setIsUploading(true);
         setUploadError(null);
 
-        // This sends the selected file to Laravel, where it is validated, stored, and saved in MySQL.
-        router.post(
-            `/projects/${project.id}/media`,
-            { file, type },
-            {
-                forceFormData: true,
-                preserveScroll: true,
-                onError: (errors) => {
-                    setUploadError(
-                        errors.file ??
-                            'Upload failed. Check the file type and size.',
-                    );
+        let currentFileIndex = 0;
+
+        function uploadNextFile() {
+            const file = filesToUpload[currentFileIndex];
+            const type = getMediaType(file);
+
+            if (!file || !type) {
+                setIsUploading(false);
+                return;
+            }
+
+            // This sends the selected file to Laravel, where it is validated, stored, and saved in MySQL.
+            router.post(
+                `/projects/${project.id}/media`,
+                { file, type },
+                {
+                    forceFormData: true,
+                    preserveScroll: true,
+                    onError: (errors) => {
+                        setUploadError(
+                            errors.file ??
+                                `Upload failed for ${file.name}. Check the file type and size.`,
+                        );
+                    },
+                    onFinish: () => {
+                        currentFileIndex += 1;
+
+                        if (currentFileIndex < filesToUpload.length) {
+                            uploadNextFile();
+                            return;
+                        }
+
+                        setIsUploading(false);
+                    },
                 },
-                onFinish: () => {
-                    setIsUploading(false);
-                    event.target.value = '';
-                },
-            },
-        );
+            );
+        }
+
+        uploadNextFile();
+    }
+
+    function uploadMedia(event: React.ChangeEvent<HTMLInputElement>) {
+        const files = event.target.files;
+
+        if (!files) {
+            return;
+        }
+
+        uploadMediaFiles(files);
+        event.target.value = '';
+    }
+
+    function allowMediaPoolFileDrop(event: React.DragEvent<HTMLElement>) {
+        if (event.dataTransfer.types.includes('Files')) {
+            event.preventDefault();
+            event.dataTransfer.dropEffect = 'copy';
+        }
+    }
+
+    function dropFilesOnMediaPool(event: React.DragEvent<HTMLElement>) {
+        if (!event.dataTransfer.files.length) {
+            return;
+        }
+
+        event.preventDefault();
+        event.stopPropagation();
+        uploadMediaFiles(event.dataTransfer.files);
     }
 
     function toggleDeleteMediaMode() {
@@ -3286,6 +3335,8 @@ export default function Editor({
                             media={media}
                             mediaDurations={mediaDurations}
                             onDeleteSelectedMedia={deleteSelectedMedia}
+                            onMediaPoolDragOver={allowMediaPoolFileDrop}
+                            onMediaPoolDrop={dropFilesOnMediaPool}
                             onMediaDrag={updateTimelineDragPosition}
                             onMediaDragEnd={stopMediaDrag}
                             onMediaDragStart={startMediaDrag}
